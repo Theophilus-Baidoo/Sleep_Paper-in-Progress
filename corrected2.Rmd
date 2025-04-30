@@ -1,0 +1,1796 @@
+---
+title: 'NHANES 2017/2018 Study'
+author: 
+  - Theophilus Baidoo^[tbaidoo@iu.edu, Indiana University Bloomington (IUB).]
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  bookdown::pdf_document2:
+    fig_caption: true
+    latex_engine: xelatex
+    number_sections: true
+    toc: true
+    toc_depth: 4
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{amsfonts}
+  - \usepackage{amsthm}
+  - \usepackage{floatrow}
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \rhead{Theophilus Baidoo}
+  - \lhead{Project `r params$proj_number` -- `r params$proj_title`}
+  - \cfoot{\thepage}
+  - \usepackage{algorithm}
+  - \usepackage[noend]{algpseudocode}
+geometry: margin = 0.8in
+fontsize: 10pt
+params:
+  proj_number: I
+  proj_title: NHANES Study
+---
+
+
+```{r, message=FALSE, warning=FALSE}
+ #Load necessary libraries
+library(tidyverse)
+library(naniar)
+library(VIM)
+library(DataExplorer)
+library(mice)
+library(DMwR2)
+library(dplyr)
+library(ggplot2)
+library(gtsummary)
+library(gt)
+library(mitools)
+library(survey)
+library(cobalt)
+library(MatchIt)
+library(tableone)
+library(geepack)
+library(epiR)
+
+# Set seed for reproducibility
+set.seed(100)
+```
+
+
+```{r}
+# Load cleaned NHANES dataset
+data_nhanes <- readRDS("nhanes_cleandata.rds")
+
+dim(data_nhanes)
+```
+
+
+```{r}
+# Load necessary library
+library(dplyr)
+
+# **Step 1: Rename Variable**
+data_nhanes <- data_nhanes %>%
+  rename(Sleep_Disorder = Trouble_Sleeping) 
+
+# **Step 2: Recode Marital Status**
+data_nhanes <- data_nhanes %>%
+  mutate(
+    Marital_Status = case_when(
+      Marital_Status %in% c("Divorced", "Separated") ~ "Separated/Divorced",
+      Marital_Status == "Widowed" ~ "Widowed",
+      Marital_Status %in% c("Living with partner", "Never married") ~ "Single",
+      Marital_Status == "Refused" ~ NA_character_,
+      TRUE ~ Marital_Status
+    ),
+    Marital_Status = factor(Marital_Status)
+  )
+
+# **Step 3: Categorize Obesity Based on BMI**
+data_nhanes <- data_nhanes %>%
+  mutate(
+    Obesity = case_when(
+      is.na(BMI) ~ NA_character_,  # Preserve missing values
+      BMI >= 30 ~ "Obese",
+      BMI < 30 ~ "Not Obese"
+    ),
+    Obesity = factor(Obesity, levels = c("Not Obese", "Obese"))  # Convert to factor
+  )
+
+# **Step 4: Cap Outliers for Sugar and Saturated Fat Intake**
+data_nhanes <- data_nhanes %>%
+  mutate(
+    Sugar_Intake = ifelse(
+      is.na(Sugar_Intake), NA, 
+      pmin(Sugar_Intake, quantile(Sugar_Intake, 0.99, na.rm = TRUE))
+    ),
+    Saturated_Fat_Intake = ifelse(
+      is.na(Saturated_Fat_Intake), NA, 
+      pmin(Saturated_Fat_Intake, quantile(Saturated_Fat_Intake, 0.99, na.rm = TRUE))
+    )
+  )
+
+# **Step 5: Create Age Tertiles**
+data_nhanes <- data_nhanes %>%
+  mutate(
+    Age_Group = cut(Age, 
+      breaks = quantile(Age, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE), 
+      include.lowest = TRUE, 
+      labels = c("18-39", "40-61", "62+"))
+  )
+
+# **Step 6: Ensure Necessary Variables Exist Before Imputation**
+#vars_to_check <- c("Age_Group", "Obesity", "ps", "sweight", "ind", "new.sweight")
+#for (var in vars_to_check) {
+ # if (!var %in% names(data_nhanes)) data_nhanes[[var]] <- NA
+#}
+
+# **Step 7: Remove Unnecessary Variables**
+data_nhanes <- data_nhanes %>% select(-BMI, -Age, -Vigorous_Activity, -Sleep_Hours,-Alcohol_Consumption)
+
+# Identify variables with fewer than 5 missing values
+missing_counts <- colSums(is.na(data_nhanes))
+
+# Select variables with < 5 missing values
+vars_to_filter <- names(missing_counts[missing_counts < 5])
+
+# Remove rows where any of these variables have NA
+data_nhanes <- data_nhanes %>%
+  filter(if_all(all_of(vars_to_filter), ~ !is.na(.)))
+
+# Check remaining rows
+nrow(data_nhanes)
+
+
+# **Step 10: Check Missing Data Visualization**
+plot_missing(data_nhanes)
+miss_var_summary(data_nhanes)
+gg_miss_upset(data_nhanes)
+
+```
+
+
+```{r}
+# Create Age Tertiles
+#data_nhanes <- data_nhanes %>%
+ # mutate(Age_Group = cut(Age, 
+  #  breaks = quantile(Age, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE), 
+   # include.lowest = TRUE, 
+    #labels = c("18-39", "40-61", "62+")))
+
+# Create Binary Obesity Variable
+#data_nhanes <- data_nhanes %>%
+ # mutate(Obesity = factor(ifelse(BMI >= 30, "Obese", "Not Obese")))
+
+# Cap Extreme Values for Sugar & Saturated Fat Intake
+#data_nhanes <- data_nhanes %>%
+ # mutate(
+  #  Sugar_Intake = pmin(Sugar_Intake, quantile(Sugar_Intake, 0.99, na.rm = TRUE)),
+   # Saturated_Fat_Intake = pmin(Saturated_Fat_Intake, quantile(Saturated_Fat_Intake, 0.99, na.rm = TRUE))
+  #) %>%
+  #filter(!is.na(Sugar_Intake) & !is.na(Saturated_Fat_Intake))
+
+# Convert categorical variables to factors
+#categorical_vars <- c(
+ # "Sleep_Disorder", "Physical_Activity", "Vigorous_Activity", 
+  #"Gender", "Diabetes_Status", "Smoking_Status", "Obesity", "Age_Group", 
+  #"Marital_Status", "Depression_Score", "Race_Ethnicity"
+#)
+#data_nhanes[categorical_vars] <- lapply(data_nhanes[categorical_vars], function(x) #factor(x, exclude = NA))
+
+# Remove unnecessary variables
+#data_nhanes <- data_nhanes %>% select(-BMI, -Age, -Vigorous_Activity,-Sleep_Hours)
+```
+
+
+```{r}
+imputation <- mice(data = data_nhanes, maxit = 0, print = FALSE)
+```
+
+```{r, include=FALSE}
+pred <- imputation$pred
+pred
+```
+
+```{r, include=FALSE}
+pred[,"SEQN"] <- pred["SEQN",] <- 0
+pred[,"PSU"] <- pred["PSU",] <- 0
+pred[,"Survey_Weight"] <- pred["Survey_Weight",] <- 0
+pred["Stratum",] <- 0
+pred
+```
+
+```{r}
+meth <- imputation$meth
+meth["Sugar_Intake"] <- "pmm"
+```
+
+```{r}
+# Perform MICE 
+#methods_mice <- rep("", ncol(data_nhanes))
+#names(methods_mice) <- colnames(data_nhanes)
+#methods_mice[c("Alcohol_Consumption", "Saturated_Fat_Intake", "Sugar_Intake")] <- "pmm"
+#methods_mice[c("Sleep_Disorder", "Physical_Activity", "Gender", "Obesity")] <- "logreg"
+#methods_mice[c("Diabetes_Status", "Smoking_Status", "Depression_Score", "Race_Ethnicity", #"Age_Group","Marital_Status")] <- "polyreg"
+#methods_mice[c("SEQN", "PSU", "Stratum", "Survey_Weight")] <- ""
+```
+
+
+```{r}
+imputation <- mice(data = data_nhanes, 
+                   seed = 123, 
+                   predictorMatrix = pred,
+                   method = meth, 
+                   m = 5, 
+                   maxit = 20, 
+                   print = FALSE)
+impdata <- mice::complete(imputation, action="long")
+```
+
+
+```{r}
+#library(dplyr)
+
+#impdata <- impdata %>%
+ # group_by(.imp) %>%
+  #mutate(
+    # Create Age Tertiles
+   # Age_Group = cut(Age, 
+    #                breaks = quantile(Age, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE), 
+     #               include.lowest = TRUE, 
+      #              labels = c("18-39", "40-61", "62+")),
+    
+    # Create Binary Obesity Variable
+    #Obesity = factor(ifelse(BMI >= 30, "Obese", "Not Obese")),
+    
+    # Cap Extreme Values for Sugar & Saturated Fat Intake
+    #Sugar_Intake = pmin(Sugar_Intake, quantile(Sugar_Intake, 0.99, na.rm = TRUE)),
+    #Saturated_Fat_Intake = pmin(Saturated_Fat_Intake, quantile(Saturated_Fat_Intake, 0.99, na.rm = #TRUE))
+ # ) %>%
+  
+  # Convert categorical variables to factors
+  #mutate(across(c("Sleep_Disorder", "Physical_Activity", "Vigorous_Activity", 
+   #               "Gender", "Diabetes_Status", "Smoking_Status", "Obesity", 
+    #              "Age_Group", "Marital_Status", "Depression_Score", "Race_Ethnicity"), as.factor)) %>%
+  
+  # Remove unnecessary variables
+  #select(-BMI, -Age, -Vigorous_Activity, -Sleep_Hours)
+
+# Check the transformed dataset
+#str(impdata)
+```
+
+
+```{r, message=FALSE, include=FALSE}
+# Ensure data is ungrouped before creating imputation list
+#impdata <- impdata %>% ungroup()
+
+impdata$.id <- NULL
+m <- 5
+set.seed(123)
+
+allImputations <- imputationList(lapply(1:m, 
+                                         function(n)
+                                           subset(impdata, subset=.imp==n)))
+
+# Check structure
+str(allImputations)
+
+```
+
+
+
+```{r}
+# Missing after imputation
+DataExplorer::plot_missing(impdata)
+```
+```{r}
+#library(dplyr)
+#library(mitools)  # For handling multiple imputations
+
+# Function to apply transformations to each imputed dataset
+#transform_data <- function(df) {
+ # df <- df %>%
+  #  # Create Age Tertiles
+   # mutate(Age_Group = cut(Age, 
+    #                       breaks = quantile(Age, probs = c(0, 1/3, 2/3, 1), na.rm = #TRUE), 
+ #                          include.lowest = TRUE, 
+  #                         labels = c("18-39", "40-61", "62+"))) %>%
+   # 
+    # Create Binary Obesity Variable
+    #mutate(Obesity = factor(ifelse(BMI >= 30, "Obese", "Not Obese"))) %>%
+    
+    # Cap Extreme Values for Sugar & Saturated Fat Intake
+  #  mutate(
+   #   Sugar_Intake = pmin(Sugar_Intake, quantile(Sugar_Intake, 0.99, na.rm = TRUE)),
+    #  Saturated_Fat_Intake = pmin(Saturated_Fat_Intake, quantile(Saturated_Fat_Intake, #0.99, na.rm = TRUE))
+ #   ) %>%
+    
+  #  # Convert categorical variables to factors
+   # mutate(across(c(
+  #    "Sleep_Disorder", "Physical_Activity", "Vigorous_Activity", 
+  #    "Gender", "Diabetes_Status", "Smoking_Status", "Obesity", "Age_Group", 
+  #    "Marital_Status", "Depression_Score", "Race_Ethnicity"), as.factor)) %>%
+    
+    # Remove unnecessary variables
+  #  select(-BMI, -Age, -Vigorous_Activity, -Sleep_Hours)
+
+  #return(df)
+#}
+
+# Apply transformation to each imputed dataset
+#transformedImputations <- imputationList(lapply(allImputations$imputations, #transform_data))
+
+# Check structure after modifications
+#str(transformedImputations)
+
+```
+
+
+
+## Design
+A survey design object is created, ensuring that subsequent analyses appropriately account for the survey design.
+
+
+
+```{r}
+w.design <- svydesign(ids = ~PSU, weights = ~Survey_Weight, strata = ~Stratum,
+                      data = allImputations, nest = TRUE)
+```
+
+## Survey data analysis without PS
+A logistic regression model is fitted to each imputed dataset.
+
+```{r}
+model.formula <- as.formula(I(Obesity == 'Obese') ~ 
+                              Sleep_Disorder + Gender + Race_Ethnicity + Diabetes_Status + Age_Group + 
+                              Physical_Activity + Saturated_Fat_Intake + Smoking_Status + Sugar_Intake)
+
+
+fit.modified.poisson <- with(w.design, svyglm(model.formula, family = poisson(link = "log")))
+#summary(fit.modified.poisson)
+
+```
+```{r}
+pooled.estimates <- MIcombine(fit.modified.poisson)
+summary(pooled.estimates, digits = 4, logeffect = TRUE)
+
+```
+
+
+```{r}
+RR <- round(exp(pooled.estimates$coefficients), 4) 
+RR <- as.data.frame(RR)
+CI <- round(exp(confint(pooled.estimates)), 4)
+RR <- cbind(RR, CI)
+RR[2,]
+```
+
+
+## Step 2: PS weighting steps 1-3 by DuGoff et al. (2014)
+Our next step is to use steps 1-3 of the PS weighting analysis:
+
+Step 2.1: Fit the PS model by considering survey features as covariates.
+Step 2.2: Calculate PS weights
+Step 2.3: Balance checking using SMD. Consider SMD <0.2 as a good covariate balancing.
+
+## Step 2.1: PS model specification
+
+```{r}
+# Specify the PS model to estimate propensity scores
+ps.formula <- as.formula(I(Sleep_Disorder == "Yes") ~ Age_Group + Gender + 
+                           Race_Ethnicity + Marital_Status + Smoking_Status 
+                             + PSU + Stratum + Survey_Weight)
+```
+
+
+# Step 2.2: Estimating PS and calculating weights
+
+```{r}
+dat.ps <- list(NULL)
+
+m <- 5 # 5 imputed dataset
+
+# PS weighting on each of the imputed datasets
+for (ii in 1:m) {
+  # Imputed dataset
+  dat.imputed <- subset(impdata, .imp == ii)
+  
+  # Propensity scores
+  ps.fit <- glm(ps.formula, data = dat.imputed, family = binomial("logit"))
+  dat.imputed$ps <- fitted(ps.fit)
+  
+  # Stabilized weight
+  dat.imputed$sweight <- with(dat.imputed, 
+                              ifelse(I(Sleep_Disorder == "Yes"), 
+                                     mean(I(Sleep_Disorder == "Yes"))/ps, 
+                                     (1-mean(I(Sleep_Disorder == "Yes")))/(1-ps)))
+
+  #Truncate extreme weights (1st and 99th percentiles)
+  dat.imputed$sweight <- with(dat.imputed, 
+                               pmin(pmax(sweight, quantile(sweight, 0.01)), 
+                                    quantile(sweight, 0.99)))
+  # Dataset
+  dat.ps[[ii]] <- dat.imputed
+}
+
+# Weight summary
+purrr::map_df(dat.ps, function(df){summary(df$sweight)})
+```
+```{r}
+# Dimension of each of the imputed dataset
+lapply(dat.ps, dim)
+```
+
+## Step 2.3: Balance checking for each imputed dataset
+Now we will check balance in terms of SMD on each dataset
+
+```{r}
+tab1m <- list(NULL)
+for (ii in 1:m) {
+  # PS weighted imputed data
+  dat <- dat.ps[[ii]]
+  
+  # Covariates
+  vars <- c("Age_Group", "Gender", "Race_Ethnicity", "Marital_Status", "Smoking_Status", "Physical_Activity", 
+            "Saturated_Fat_Intake", "Sugar_Intake", "Diabetes_Status")
+  
+  # Design with truncated stabilized weight
+  wdesign <- svydesign(ids = ~SEQN, weights = ~sweight, data = dat)
+  
+  # Balance checking 
+  tab1m[[ii]] <- svyCreateTableOne(vars = vars, strata = "Sleep_Disorder", data = wdesign,
+                                   test = F)
+}
+print(tab1m, smd = TRUE)
+```
+
+
+## Step 3: Outcome modelling
+
+Our next step is to fit the outcome model on each of the imputed dataset. Note that, we must utilize survey features to correctly estimate the standard error. For this step, we will multiply PS weight and survey weight and create a new weight variable.
+
+```{r}
+# Step 2.5: Define Survey Design Using the Full NHANES Dataset
+dat.full <- data_nhanes  # Use full NHANES dataset (before weighting)
+dat.full$ind <- 0  # Indicator variable (0 = Not in analytic dataset, 1 = In analytic dataset)
+
+w.design.ps <- list()  # Initialize list to store survey designs
+
+for (ii in 1:m) {
+  dat <- dat.ps[[ii]]  # Get the PS-weighted dataset
+  
+  # Merge missing columns from `dat.ps[[ii]]` into `dat.full`
+  #dat.full <- left_join(dat.full, select(dat, SEQN, Age_Group, Obesity, ps, sweight), by = "SEQN")
+  # Merge necessary variables into dat.full
+  #common_vars <- intersect(names(dat.full), names(dat))
+  #dat.full <- dat.full %>% select(all_of(common_vars))
+  
+  # Merge analytic dataset variables into dat.full to prevent missing columns
+  #dat.full <- full_join(dat.full, select(dat, SEQN, model.formula[[2]]), by = "SEQN")
+  
+  # Mark analytic subjects in full dataset
+  dat.full$ind[dat.full$SEQN %in% dat$SEQN] <- 1
+  
+  # Assign new PS-weighted survey weights
+  dat$new.sweight <- with(dat, Survey_Weight * sweight)  # Combine PS weights & NHANES weights
+  
+  # Initialize weights in the full dataset as 0
+  dat.full$new.sweight <- 0
+  dat.full$new.sweight[dat.full$SEQN %in% dat$SEQN] <- dat$new.sweight  # Assign PS weights
+
+  # Step 2.6: Set up the full survey design
+  w.design.full <- svydesign(
+    id = ~PSU, 
+    strata = ~Stratum, 
+    weights = ~new.sweight, 
+    data = dat.full, 
+    nest = TRUE
+  )
+  
+  # Subset the design to the analytic sample (PS-weighted)
+  w.design.ps[[ii]] <- subset(w.design.full, ind == 1)
+}
+
+
+```
+
+
+
+
+Now, we fit the outcome model using the PS-weighted and survey-adjusted dataset
+
+```{r}
+
+model.formula <- as.formula(I(Obesity == 'Obese') ~ Sleep_Disorder + Gender + Race_Ethnicity + Marital_Status + 
+                             Diabetes_Status + Age_Group + Physical_Activity + 
+                             Saturated_Fat_Intake + Smoking_Status + Sugar_Intake)
+
+# Step 2.7: Fit Survey-Weighted Poisson Regression on PS-Weighted Data
+model.ps <- list()
+
+for (ii in 1:m) {
+  model.ps[[ii]] <- svyglm(model.formula, design = w.design.ps[[ii]], family = poisson(link = "log"))
+}
+```
+
+
+```{r}
+# Step 2.8: Pool the Model Results Across Imputed Datasets
+pooled.model <- MIcombine(model.ps)
+summary(pooled.model, digits = 4, logeffect = TRUE)
+
+```
+
+```{r}
+library(kableExtra)
+
+library(kableExtra)
+
+# Function to compute risk ratio, CI, and p-value
+compute_rr_ci <- function(coef, se, p_value) {
+  rr <- exp(coef)
+  ci_lower <- exp(coef - 1.96 * se)
+  ci_upper <- exp(coef + 1.96 * se)
+  data.frame(
+    Risk_Ratio = round(rr, 3),
+    CI_Lower = round(ci_lower, 3),
+    CI_Upper = round(ci_upper, 3),
+    P_Value = format.pval(p_value, digits = 3, eps = 0.001)
+  )
+}
+
+# Extract pooled coefficients and standard errors from combined_results_mice
+pooled_coefficients <- pooled.model$coefficients
+pooled_se <- sqrt(diag(pooled.model$variance))
+
+# Combine into a data frame
+mice_results <- data.frame(
+  Estimate = pooled_coefficients,
+  SE = pooled_se
+)
+
+# Add variable names as a column
+mice_results <- data.frame(
+  Variable = names(pooled_coefficients),  # Explicitly add variable names
+  mice_results
+)
+
+# Compute risk ratios, confidence intervals, and p-values
+mice_table <- compute_rr_ci(
+  coef = mice_results$Estimate,
+  se = mice_results$SE,
+  p_value = 2 * pnorm(-abs(mice_results$Estimate / mice_results$SE))
+)
+
+# Combine results with variable names
+mice_table <- data.frame(
+  Variable = mice_results$Variable,  # Keep variable names
+  mice_table
+)
+
+# Format the table with kableExtra
+mice_kable <- mice_table %>%
+  kbl(caption = "Risk Ratios, Confidence Intervals, and P-Values (MICE Approach)") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  column_spec(1, bold = T)  # Bold the first column (variable names)
+
+# Print the table
+mice_kable
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Mark significant variables (P < 0.05)
+mice_table <- mice_table %>%
+  mutate(Significant = ifelse(P_Value < 0.05, "Significant", "Not Significant"))
+
+# Order variables for better visualization
+mice_table$Variable <- factor(mice_table$Variable, levels = mice_table$Variable[order(mice_table$Risk_Ratio)])
+
+# Create a ggplot (Enhanced Forest Plot)
+ggplot(mice_table, aes(x = Variable, y = Risk_Ratio, ymin = CI_Lower, ymax = CI_Upper, color = Significant)) +
+  geom_pointrange(size = 1, fatten = 2) +  # Larger points with thicker lines
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at RR = 1
+  coord_flip() +  # Flip axes for better readability
+  theme_minimal(base_family = "sans") +  # ✅ FIXED: Use "sans" font
+  theme(
+    axis.title.y = element_blank(),  # Remove y-axis label
+    axis.text.y = element_text(size = 14, face = "bold"),  # Larger variable names
+    axis.text.x = element_text(size = 12),
+    legend.position = "top",  # Move legend to the top
+    legend.text = element_text(size = 12),
+    panel.grid.major.y = element_blank(),  # Remove unnecessary grid lines
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Risk Ratios with 95% Confidence Intervals",
+    subtitle = "Significant variables highlighted in red",
+    y = "Risk Ratio (95% CI)",
+    color = "Statistical Significance"
+  ) +
+  scale_color_manual(values = c("Not Significant" = "gray70", "Significant" = "red"))  # Color scheme
+
+
+```
+
+## KNN Imputation
+
+```{r}
+library(DMwR2)
+library(dplyr)
+
+# Exclude non-imputable survey design variables
+exclude_vars <- c("SEQN", "PSU", "Stratum", "Survey_Weight")
+
+# Create dataset for imputation (excluding non-imputable variables)
+data_for_imputation <- data_nhanes %>%
+  select(-all_of(exclude_vars))
+
+# Store the excluded variables separately
+excluded_data <- data_nhanes %>%
+  select(all_of(exclude_vars))
+
+# Perform KNN imputation (k = 5)
+set.seed(123)
+imputed_data_knn <- knnImputation(
+  data = data_for_imputation,  
+  k = 5                       
+)
+
+# Reattach excluded variables after imputation
+final_data_knn <- cbind(excluded_data, imputed_data_knn)
+
+# Check if missing values are imputed
+colSums(is.na(final_data_knn))  # Should return all zeros
+
+```
+
+```{r}
+# Create Table 1 Before Imputation (Raw Data)
+table1_raw <- CreateTableOne(vars = c("Age_Group", "Gender", "Race_Ethnicity", 
+                                      "Smoking_Status", "Marital_Status", "Physical_Activity", 
+                                      "Saturated_Fat_Intake", "Sugar_Intake", 
+                                      "Diabetes_Status", "Obesity"), 
+                             strata = "Sleep_Disorder", 
+                             data = data_nhanes, 
+                             test = FALSE)
+
+# Print the table
+#print(table1_raw, smd = TRUE)
+
+```
+```{r}
+# Create Table 1 After MICE Imputation
+table1_mice <- CreateTableOne(vars = c("Age_Group", "Gender", "Race_Ethnicity", 
+                                       "Smoking_Status","Marital_Status", "Physical_Activity", 
+                                       "Saturated_Fat_Intake", "Sugar_Intake", 
+                                       "Diabetes_Status", "Obesity"), 
+                              strata = "Sleep_Disorder", 
+                              data = impdata, 
+                              test = FALSE)
+
+# Print the table
+#print(table1_mice, smd = TRUE)
+
+```
+```{r}
+# Create Table 1 After KNN Imputation
+table1_knn <- CreateTableOne(vars = c("Age_Group", "Gender", "Race_Ethnicity", 
+                                      "Smoking_Status", "Physical_Activity", 
+                                      "Saturated_Fat_Intake","Marital_Status", "Sugar_Intake", 
+                                      "Diabetes_Status", "Obesity"), 
+                             strata = "Sleep_Disorder", 
+                             data = final_data_knn, 
+                             test = FALSE)
+
+# Print the table
+print(table1_knn, smd = TRUE)
+
+```
+
+
+## Making of Table 1
+```{r}
+# Load required libraries
+library(gtsummary)
+library(gt)
+library(dplyr)
+
+# Select variables excluding SEQN, Stratum, PSU, Survey_Weight
+data_selected <- data_nhanes %>%
+  select(-SEQN, -Stratum, -PSU, -Survey_Weight)
+
+# Convert categorical variables to factors
+data_selected <- data_selected %>%
+  mutate(
+    Age_Group = as.factor(Age_Group),
+    Gender = as.factor(Gender),
+    Marital_Status = as.factor(Marital_Status),
+    Race_Ethnicity = as.factor(Race_Ethnicity),
+    Smoking_Status = as.factor(Smoking_Status),
+    Physical_Activity = as.factor(Physical_Activity),
+    Diabetes_Status = as.factor(Diabetes_Status),
+    Obesity = as.factor(Obesity)
+  )
+
+# Specify custom statistics for continuous variables
+custom_stats <- list(
+  all_continuous() ~ "{median} ({p25}, {p75})",
+  Saturated_Fat_Intake = "{median} ({p25}, {p75})",
+  Sugar_Intake = "{median} ({p25}, {p75})"
+)
+
+# Generate Table 1 stratified by Sleep Disorder status
+table_one <- tbl_summary(
+  data_selected,
+  by = Sleep_Disorder,  # Stratified by Sleep Disorder
+  statistic = custom_stats,
+  digits = all_continuous() ~ 2,  # Specify number of decimal places
+  missing = "no"  # Hide missing counts
+) %>%
+  add_p() %>%  # Add p-values (Chi-square for categorical, Wilcoxon for continuous)
+  add_overall() %>%  # Add overall column
+  modify_header(label = "**Variable**") %>%
+  modify_spanning_header(c("stat_1", "stat_2") ~ "**Sleep Disorder Status**") %>%
+  bold_labels() %>%
+  as_gt() %>%  # Convert to gt table
+  gt::tab_header(
+    title = "Table 1: Baseline Characteristics Stratified by Sleep Disorder Status",
+    subtitle = "Continuous variables are presented as Median (IQR)"
+  ) %>%
+  gt::sub_missing(missing_text = "") %>%
+  gt::cols_label(
+    label = md("**Variable**"),
+    stat_0 = md("**Overall**"),
+    stat_1 = md("**No**"),
+    stat_2 = md("**Yes**"),
+    p.value = md("**p-value**")
+  ) %>%
+  gt::tab_options(
+    table.font.names = "Arial",
+    column_labels.font.weight = "bold",
+    table.border.top.width = gt::px(2),
+    table.border.top.color = "black",
+    table.border.bottom.width = gt::px(2),
+    table.border.bottom.color = "black"
+  )
+
+# Print the LaTeX code for the table
+latex_code <- as_latex(table_one)
+cat(as.character(latex_code))
+
+# Save table as Word and PDF
+#gtsave(table_one, "Table1_SleepDisorder.docx")  # Save as Word document
+#gtsave(table_one, "Table1_SleepDisorder.pdf")  # Save as PDF
+
+# Display the table in R
+table_one
+
+
+```
+
+# Before PSW
+
+```{r}
+# Load required libraries
+library(tableone)
+library(kableExtra)
+library(dplyr)
+library(purrr)
+library(tibble)  # For rownames_to_column()
+
+# Define variables for Table 1 (excluding Sleep_Disorder)
+vars <- c("Age_Group", "Gender", "Marital_Status", "Race_Ethnicity", 
+          "Smoking_Status", "Physical_Activity", 
+          "Saturated_Fat_Intake", "Sugar_Intake", 
+          "Diabetes_Status")
+
+# Generate Table 1 for MICE and KNN datasets
+table_mice <- CreateTableOne(vars = vars, strata = "Sleep_Disorder", data = impdata, test = FALSE)
+table_knn  <- CreateTableOne(vars = vars, strata = "Sleep_Disorder", data = final_data_knn, test = FALSE)
+
+# Convert Table 1 objects to data frames
+table_mice_df <- print(table_mice, smd = TRUE, quote = FALSE, noSpaces = TRUE) %>% as.data.frame()
+table_knn_df  <- print(table_knn,  smd = TRUE, quote = FALSE, noSpaces = TRUE) %>% as.data.frame()
+
+# Reset row names as a new column before merging
+table_mice_df <- table_mice_df %>% rownames_to_column(var = "Variable")
+table_knn_df  <- table_knn_df %>% rownames_to_column(var = "Variable")
+
+# Shift categories to the right using non-breaking spaces
+table_mice_df <- table_mice_df %>%
+  mutate(Variable = ifelse(grepl(" \\(", Variable), paste0("&nbsp;&nbsp;&nbsp;", Variable), Variable))
+
+table_knn_df <- table_knn_df %>%
+  mutate(Variable = ifelse(grepl(" \\(", Variable), paste0("&nbsp;&nbsp;&nbsp;", Variable), Variable))
+
+# Rename columns to indicate dataset type
+colnames(table_mice_df)[-1] <- paste0("MICE_", colnames(table_mice_df)[-1])
+colnames(table_knn_df)[-1]  <- paste0("KNN_", colnames(table_knn_df)[-1])
+
+# Merge tables side by side using 'Variable' as the key
+table_combined <- full_join(table_mice_df, table_knn_df, by = "Variable")
+
+# Adjust header row based on actual column count
+header_row <- c(" " = 1, "MICE Imputed" = (ncol(table_mice_df) - 1), 
+                "KNN Imputed" = (ncol(table_knn_df) - 1))
+
+# Create a publication-quality table using kableExtra
+table_combined %>%
+  kbl(caption = "Baseline Characteristics After Imputation (MICE vs. KNN)", 
+      align = "lccc", escape = FALSE) %>%  # escape = FALSE to render HTML spaces
+  kable_classic(full_width = FALSE, html_font = "Cambria") %>%
+  column_spec(1, bold = TRUE) %>%
+  add_header_above(header_row)
+
+
+
+
+```
+
+
+
+
+
+
+
+```{r}
+library(survey)
+
+# Define survey design for KNN-imputed dataset
+#w.design.knn <- svydesign(
+ # ids = ~PSU, 
+  #weights = ~Survey_Weight, 
+  #strata = ~Stratum,
+  #data = final_data_knn, 
+  #nest = TRUE
+#)
+
+```
+
+## Fit Outcome Model Without PS Weighting
+
+```{r}
+# Define the model formula
+#model.formula <- as.formula(I(Obesity == 'Obese') ~ 
+ #                             Sleep_Disorder + Gender + Race_Ethnicity + Diabetes_Status + #Age_Group + 
+  #                            Physical_Activity + Saturated_Fat_Intake + Smoking_Status + #Sugar_Intake + PSU + Stratum + Survey_Weight)
+
+# Fit a Poisson regression model
+#fit.knn.poisson <- svyglm(model.formula, design = w.design.knn, family = poisson(link = "log"))
+
+# Summary of model results
+#summary(fit.knn.poisson)
+
+```
+
+```{r}
+# Specify the Propensity Score model
+ps.formula <- as.formula(I(Sleep_Disorder == "Yes") ~ Age_Group + Gender + 
+                           Race_Ethnicity + Marital_Status + Smoking_Status  
+                           + PSU + Stratum + Survey_Weight)
+
+# Fit the PS model
+ps.fit.knn <- glm(ps.formula, data = final_data_knn, family = binomial("logit"))
+
+# Generate propensity scores
+final_data_knn$ps <- fitted(ps.fit.knn)
+
+```
+
+
+```{r}
+# Calculate stabilized weights
+final_data_knn$sweightt <- with(final_data_knn, 
+                              ifelse(I(Sleep_Disorder == "Yes"), 
+                                     mean(I(Sleep_Disorder == "Yes")) / ps, 
+                                     (1 - mean(I(Sleep_Disorder == "Yes"))) / (1 - ps)))
+
+# Truncate extreme weights (1st and 99th percentiles)
+final_data_knn$sweightt <- with(final_data_knn, 
+                               pmin(pmax(sweightt, quantile(sweightt, 0.01)), 
+                                    quantile(sweightt, 0.99)))
+
+
+
+# Summary of stabilized weights
+summary(final_data_knn$sweightt)
+
+```
+
+```{r}
+
+
+#cov2 <- c("Age_Group", "Gender", "Race_Ethnicity", "Smoking_Status", 
+ #                 "Physical_Activity", "Saturated_Fat_Intake", "Sugar_Intake", "Diabetes_Status")
+
+#design with truncated stabilized weight
+#design.stab <- svydesign(ids = ~SEQN, weights = ~sweightt, data = final_data_knn)
+
+#balance checking
+#tab.stab2 <- svyCreateCatTable(vars = cov2, strata = "Sleep_Disorder", data = design.stab, test = #F)
+
+#print(tab.stab2, smd = T)
+```
+
+```{r}
+library(tableone)
+
+# Define categorical and continuous variables separately
+cov_categorical <- c("Age_Group", "Gender", "Race_Ethnicity", "Marital_Status", "Smoking_Status", 
+                     "Physical_Activity", "Diabetes_Status")
+
+cov_continuous <- c("Saturated_Fat_Intake", "Sugar_Intake")  # Treat as continuous
+
+# Create table ensuring proper data type handling
+tab.stab2 <- svyCreateTableOne(
+  vars = c(cov_categorical, cov_continuous),
+  strata = "Sleep_Disorder",
+  data = design.stab,
+  test = FALSE
+)
+
+# Print with SMD values
+print(tab.stab2, smd = TRUE)
+
+```
+
+```{r}
+dat.fulll <- data_nhanes
+dat.fulll$ind <- 0
+dat.fulll$ind[dat.fulll$SEQN %in% final_data_knn$SEQN] <- 1
+
+# Define new survey weights as (survey weight * PS weight)
+final_data_knn$new.sweightt <- with(final_data_knn, Survey_Weight * sweightt)
+summary(final_data_knn$new.sweightt)
+```
+
+
+```{r}
+dat.fulll$new.sweightt <- 0
+dat.fulll$new.sweightt[dat.fulll$SEQN %in% final_data_knn$SEQN] <- final_data_knn$new.sweightt
+summary(dat.fulll$new.sweightt)
+```
+
+
+```{r}
+# Define survey design with full data
+w.design.ps.knn <- svydesign(
+  id = ~PSU, 
+  strata = ~Stratum,
+  weights = ~new.sweightt,
+  data = dat.fulll, 
+  nest = TRUE
+)
+
+w.design.s2 <- subset(w.design.ps.knn, ind == 1)
+
+```
+
+
+## SMDS after PSW with and w/o survey weights
+```{r}
+#library(cobalt)
+#library(tableone)
+
+# Define covariates to check balance
+#balance_vars <- c("Age_Group", "Gender", "Race_Ethnicity", "Smoking_Status", 
+ #                 "Physical_Activity", "Saturated_Fat_Intake", "Sugar_Intake", "Diabetes_Status")
+
+# **Step 2.1: Create Survey Design Objects**
+# Create survey design before weighting
+#w.design.unweighted <- svydesign(
+ # id = ~SEQN, 
+  #data = final_data_knn, 
+  #nest = TRUE
+#)
+
+# **Step 2.2: Create Balance Tables Before & After Weighting**
+# Table before weighting
+#tab_unweighted <- svyCreateTableOne(vars = balance_vars, strata = "Sleep_Disorder", data = #w.design.unweighted, test = FALSE)
+
+# Table after weighting
+#tab_weighted <- svyCreateTableOne(vars = balance_vars, strata = "Sleep_Disorder", data = #w.design.ps.knn, test = FALSE)
+
+# Print balance tables with Standardized Mean Differences (SMD)
+#print(tab_unweighted, smd = TRUE)
+#print(tab_weighted, smd = TRUE)
+
+```
+
+
+
+```{r}
+# Fit survey-weighted Poisson regression model on PS-weighted data
+model.ps.knn <- svyglm(model.formula, design = w.design.s2, family = poisson(link = "log"))
+
+# Display summary of results
+summary(model.ps.knn)
+
+```
+
+```{r}
+library(kableExtra)
+
+# Function to compute RR, CI, and P-values
+compute_rr_ci <- function(coef, se, p_value) {
+  rr <- exp(coef)
+  ci_lower <- exp(coef - 1.96 * se)
+  ci_upper <- exp(coef + 1.96 * se)
+  data.frame(
+    Risk_Ratio = round(rr, 3),
+    CI_Lower = round(ci_lower, 3),
+    CI_Upper = round(ci_upper, 3),
+    P_Value = format.pval(p_value, digits = 3, eps = 0.001)
+  )
+}
+
+# Extract coefficients & SE
+coef_knn <- model.ps.knn$coefficients
+se_knn <- sqrt(diag(vcov(model.ps.knn)))
+
+# Create results table
+knn_results <- data.frame(
+  Variable = names(coef_knn),
+  Estimate = coef_knn,
+  SE = se_knn
+)
+
+# Compute RR, CI, and P-values
+knn_table <- compute_rr_ci(
+  coef = knn_results$Estimate,
+  se = knn_results$SE,
+  p_value = 2 * pnorm(-abs(knn_results$Estimate / knn_results$SE))
+)
+
+# Merge with variable names
+knn_table <- data.frame(
+  Variable = knn_results$Variable,
+  knn_table
+)
+
+# Format table
+knn_kable <- knn_table %>%
+  kbl(caption = "Risk Ratios, Confidence Intervals, and P-Values (KNN Approach)") %>%
+  kable_classic(full_width = F, html_font = "sans") %>%
+  column_spec(1, bold = T)
+
+# Print the table
+knn_kable
+
+```
+
+```{r}
+library(ggplot2)
+
+# Mark significant variables (P < 0.05)
+knn_table <- knn_table %>%
+  mutate(Significant = ifelse(P_Value < 0.05, "Significant", "Not Significant"))
+
+# Order variables for better visualization
+knn_table$Variable <- factor(knn_table$Variable, levels = knn_table$Variable[order(knn_table$Risk_Ratio)])
+
+# Create a ggplot (Enhanced Forest Plot)
+ggplot(knn_table, aes(x = Variable, y = Risk_Ratio, ymin = CI_Lower, ymax = CI_Upper, color = Significant)) +
+  geom_pointrange(size = 1, fatten = 2) +  # Larger points with thicker lines
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at RR = 1
+  coord_flip() +  # Flip axes for better readability
+  theme_minimal(base_family = "sans") +  
+  theme(
+    axis.title.y = element_blank(),  
+    axis.text.y = element_text(size = 14, face = "bold"),  
+    axis.text.x = element_text(size = 12),
+    legend.position = "top",  
+    legend.text = element_text(size = 12),
+    panel.grid.major.y = element_blank(),  
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Risk Ratios with 95% Confidence Intervals (KNN Approach)",
+    subtitle = "Significant variables highlighted in red",
+    y = "Risk Ratio (95% CI)",
+    color = "Statistical Significance"
+  ) +
+  scale_color_manual(values = c("Not Significant" = "gray70", "Significant" = "red"))
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Add method labels to each dataset
+mice_table <- mice_table %>%
+  mutate(Method = "MICE")
+
+knn_table <- knn_table %>%
+  mutate(Method = "KNN")
+
+# Combine both datasets
+compare_table <- bind_rows(mice_table, knn_table)
+
+# Calculate the average RR across both methods for sorting
+compare_table <- compare_table %>%
+  group_by(Variable) %>%
+  mutate(Average_RR = mean(Risk_Ratio, na.rm = TRUE)) %>%
+  ungroup()
+
+# Order variables based on the average Risk Ratio (from largest to smallest)
+compare_table$Variable <- factor(compare_table$Variable, levels = unique(compare_table$Variable[order(compare_table$Average_RR)]))
+
+ggplot(compare_table, aes(x = Variable, y = Risk_Ratio, ymin = CI_Lower, ymax = CI_Upper, color = Method)) +
+  geom_pointrange(size = 1.2, position = position_dodge(width = 0.6)) +  # Space out points
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at RR = 1
+  coord_flip() +  # Flip axes for better readability
+  theme_minimal(base_family = "sans") +  
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 14, face = "bold"),  # Bold variable names
+    axis.text.x = element_text(size = 12),
+    legend.position = "top",
+    legend.text = element_text(size = 12),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Comparison of Risk Ratios: MICE vs KNN (Model 1)",
+    subtitle = "Risk Ratios with 95% Confidence Intervals (Sorted by Magnitude)",
+    y = "Risk Ratio (95% CI)",
+    color = "Imputation Method"
+  ) +
+  scale_color_manual(values = c("MICE" = "blue", "KNN" = "red"))
+
+
+```
+
+
+```{r}
+#dat.ps2 <- list(NULL)
+
+#for (ii in 1:m) {
+ # # PS weighted imputed data
+  #dat <- dat.ps[[ii]]
+  
+  # New weight = survey weight * PS weight 
+  #dat$new_weight <- with(dat, Survey_Weight * sweight)
+  
+#  dat.ps2[[ii]] <- dat
+#}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+########### Model 2 ###########
+
+## Step 2.1: PS model specification
+
+```{r}
+# Specify the PS model to estimate propensity scores
+ps.formula2 <- as.formula(I(Sleep_Disorder == "Yes") ~ Age_Group + Gender + 
+                           Race_Ethnicity + Smoking_Status + Marital_Status + PSU + Stratum + Survey_Weight)
+```
+
+
+# Step 2.2: Estimating PS and calculating weights
+
+```{r}
+dat.ps <- list(NULL)
+
+m <- 5 # 5 imputed dataset
+
+# PS weighting on each of the imputed datasets
+for (ii in 1:m) {
+  # Imputed dataset
+  dat.imputed <- subset(impdata, .imp == ii)
+  
+  # Propensity scores
+  ps.fit <- glm(ps.formula, data = dat.imputed, family = binomial("logit"))
+  dat.imputed$ps <- fitted(ps.fit)
+  
+  # Stabilized weight
+  dat.imputed$sweight <- with(dat.imputed, 
+                              ifelse(I(Sleep_Disorder == "Yes"), 
+                                     mean(I(Sleep_Disorder == "Yes"))/ps, 
+                                     (1-mean(I(Sleep_Disorder == "Yes")))/(1-ps)))
+
+  #Truncate extreme weights (1st and 99th percentiles)
+  dat.imputed$sweight <- with(dat.imputed, 
+                               pmin(pmax(sweight, quantile(sweight, 0.01)), 
+                                    quantile(sweight, 0.99)))
+  # Dataset
+  dat.ps[[ii]] <- dat.imputed
+}
+
+# Weight summary
+purrr::map_df(dat.ps, function(df){summary(df$sweight)})
+```
+```{r}
+# Dimension of each of the imputed dataset
+lapply(dat.ps, dim)
+```
+
+## Step 2.3: Balance checking for each imputed dataset
+Now we will check balance in terms of SMD on each dataset
+
+```{r}
+tab1m <- list(NULL)
+for (ii in 1:m) {
+  # PS weighted imputed data
+  dat <- dat.ps[[ii]]
+  
+  # Covariates
+  vars <- c("Age_Group", "Gender", "Race_Ethnicity", "Smoking_Status", "Marital_Status")
+  
+  # Design with truncated stabilized weight
+  wdesign <- svydesign(ids = ~SEQN, weights = ~sweight, data = dat)
+  
+  # Balance checking 
+  tab1m[[ii]] <- svyCreateTableOne(vars = vars, strata = "Sleep_Disorder", data = wdesign,
+                                   test = F)
+}
+print(tab1m, smd = TRUE)
+```
+
+
+## Step 3: Outcome modelling
+
+Our next step is to fit the outcome model on each of the imputed dataset. Note that, we must utilize survey features to correctly estimate the standard error. For this step, we will multiply PS weight and survey weight and create a new weight variable.
+
+```{r}
+# Step 2.5: Define Survey Design Using the Full NHANES Dataset
+dat.full <- data_nhanes  # Use full NHANES dataset (before weighting)
+dat.full$ind <- 0  # Indicator variable (0 = Not in analytic dataset, 1 = In analytic dataset)
+
+w.design.ps <- list()  # Initialize list to store survey designs
+
+for (ii in 1:m) {
+  dat <- dat.ps[[ii]]  # Get the PS-weighted dataset
+  
+  # Merge missing columns from `dat.ps[[ii]]` into `dat.full`
+  #dat.full <- left_join(dat.full, select(dat, SEQN, Age_Group, Obesity, ps, sweight), by = "SEQN")
+  # Merge necessary variables into dat.full
+  #common_vars <- intersect(names(dat.full), names(dat))
+  #dat.full <- dat.full %>% select(all_of(common_vars))
+  
+  # Merge analytic dataset variables into dat.full to prevent missing columns
+  #dat.full <- full_join(dat.full, select(dat, SEQN, model.formula[[2]]), by = "SEQN")
+  
+  # Mark analytic subjects in full dataset
+  dat.full$ind[dat.full$SEQN %in% dat$SEQN] <- 1
+  
+  # Assign new PS-weighted survey weights
+  dat$new.sweight <- with(dat, Survey_Weight * sweight)  # Combine PS weights & NHANES weights
+  
+  # Initialize weights in the full dataset as 0
+  dat.full$new.sweight <- 0
+  dat.full$new.sweight[dat.full$SEQN %in% dat$SEQN] <- dat$new.sweight  # Assign PS weights
+
+  # Step 2.6: Set up the full survey design
+  w.design.full <- svydesign(
+    id = ~PSU, 
+    strata = ~Stratum, 
+    weights = ~new.sweight, 
+    data = dat.full, 
+    nest = TRUE
+  )
+  
+  # Subset the design to the analytic sample (PS-weighted)
+  w.design.ps[[ii]] <- subset(w.design.full, ind == 1)
+}
+
+
+```
+
+
+
+
+Now, we fit the outcome model using the PS-weighted and survey-adjusted dataset
+
+```{r}
+
+model.formula <- as.formula(I(Obesity == 'Obese') ~ Sleep_Disorder + Gender + Race_Ethnicity + 
+                             Age_Group + Marital_Status +
+                              + Smoking_Status)
+
+# Step 2.7: Fit Survey-Weighted Poisson Regression on PS-Weighted Data
+model.ps <- list()
+
+for (ii in 1:m) {
+  model.ps[[ii]] <- svyglm(model.formula, design = w.design.ps[[ii]], family = poisson(link = "log"))
+}
+```
+
+
+```{r}
+# Step 2.8: Pool the Model Results Across Imputed Datasets
+pooled.model <- MIcombine(model.ps)
+summary(pooled.model, digits = 4, logeffect = TRUE)
+
+```
+
+```{r}
+library(kableExtra)
+
+library(kableExtra)
+
+# Function to compute risk ratio, CI, and p-value
+compute_rr_ci <- function(coef, se, p_value) {
+  rr <- exp(coef)
+  ci_lower <- exp(coef - 1.96 * se)
+  ci_upper <- exp(coef + 1.96 * se)
+  data.frame(
+    Risk_Ratio = round(rr, 3),
+    CI_Lower = round(ci_lower, 3),
+    CI_Upper = round(ci_upper, 3),
+    P_Value = format.pval(p_value, digits = 3, eps = 0.001)
+  )
+}
+
+# Extract pooled coefficients and standard errors from combined_results_mice
+pooled_coefficients <- pooled.model$coefficients
+pooled_se <- sqrt(diag(pooled.model$variance))
+
+# Combine into a data frame
+mice_results <- data.frame(
+  Estimate = pooled_coefficients,
+  SE = pooled_se
+)
+
+# Add variable names as a column
+mice_results <- data.frame(
+  Variable = names(pooled_coefficients),  # Explicitly add variable names
+  mice_results
+)
+
+# Compute risk ratios, confidence intervals, and p-values
+mice_table <- compute_rr_ci(
+  coef = mice_results$Estimate,
+  se = mice_results$SE,
+  p_value = 2 * pnorm(-abs(mice_results$Estimate / mice_results$SE))
+)
+
+# Combine results with variable names
+mice_table <- data.frame(
+  Variable = mice_results$Variable,  # Keep variable names
+  mice_table
+)
+
+# Format the table with kableExtra
+mice_kable <- mice_table %>%
+  kbl(caption = "Risk Ratios, Confidence Intervals, and P-Values (MICE Approach)") %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  column_spec(1, bold = T)  # Bold the first column (variable names)
+
+# Print the table
+mice_kable
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# Mark significant variables (P < 0.05)
+mice_table <- mice_table %>%
+  mutate(Significant = ifelse(P_Value < 0.05, "Significant", "Not Significant"))
+
+# Order variables for better visualization
+mice_table$Variable <- factor(mice_table$Variable, levels = mice_table$Variable[order(mice_table$Risk_Ratio)])
+
+# Create a ggplot (Enhanced Forest Plot)
+ggplot(mice_table, aes(x = Variable, y = Risk_Ratio, ymin = CI_Lower, ymax = CI_Upper, color = Significant)) +
+  geom_pointrange(size = 1, fatten = 2) +  # Larger points with thicker lines
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at RR = 1
+  coord_flip() +  # Flip axes for better readability
+  theme_minimal(base_family = "sans") +  # ✅ FIXED: Use "sans" font
+  theme(
+    axis.title.y = element_blank(),  # Remove y-axis label
+    axis.text.y = element_text(size = 14, face = "bold"),  # Larger variable names
+    axis.text.x = element_text(size = 12),
+    legend.position = "top",  # Move legend to the top
+    legend.text = element_text(size = 12),
+    panel.grid.major.y = element_blank(),  # Remove unnecessary grid lines
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Risk Ratios with 95% Confidence Intervals",
+    subtitle = "Significant variables highlighted in red",
+    y = "Risk Ratio (95% CI)",
+    color = "Statistical Significance"
+  ) +
+  scale_color_manual(values = c("Not Significant" = "gray70", "Significant" = "red"))  # Color scheme
+
+
+```
+
+
+
+
+
+## KNN Imputation model 2
+
+```{r}
+library(DMwR2)
+library(dplyr)
+
+# Exclude non-imputable survey design variables
+exclude_vars <- c("SEQN", "PSU", "Stratum", "Survey_Weight")
+
+# Create dataset for imputation (excluding non-imputable variables)
+data_for_imputation <- data_nhanes %>%
+  select(-all_of(exclude_vars))
+
+# Store the excluded variables separately
+excluded_data <- data_nhanes %>%
+  select(all_of(exclude_vars))
+
+# Perform KNN imputation (k = 5)
+set.seed(123)
+imputed_data_knn <- knnImputation(
+  data = data_for_imputation,  
+  k = 5                       
+)
+
+# Reattach excluded variables after imputation
+final_data_knn <- cbind(excluded_data, imputed_data_knn)
+
+# Check if missing values are imputed
+colSums(is.na(final_data_knn))  # Should return all zeros
+
+```
+
+
+
+## Fit Outcome Model Without PS Weighting
+
+```{r}
+# Define the model formula
+#model.formula <- as.formula(I(Obesity == 'Obese') ~ 
+ #                             Sleep_Disorder + Gender + Race_Ethnicity + Diabetes_Status + #Age_Group + 
+  #                            Physical_Activity + Saturated_Fat_Intake + Smoking_Status + #Sugar_Intake + PSU + Stratum + Survey_Weight)
+
+# Fit a Poisson regression model
+#fit.knn.poisson <- svyglm(model.formula, design = w.design.knn, family = poisson(link = "log"))
+
+# Summary of model results
+#summary(fit.knn.poisson)
+
+```
+
+```{r}
+# Specify the Propensity Score model
+ps.formula <- as.formula(I(Sleep_Disorder == "Yes") ~ Age_Group + Gender + 
+                           Race_Ethnicity + Smoking_Status + Marital_Status +
+                            + PSU + Stratum + Survey_Weight)
+
+# Fit the PS model
+ps.fit.knn <- glm(ps.formula, data = final_data_knn, family = binomial("logit"))
+
+# Generate propensity scores
+final_data_knn$ps <- fitted(ps.fit.knn)
+
+```
+
+
+```{r}
+# Calculate stabilized weights
+final_data_knn$sweightt <- with(final_data_knn, 
+                              ifelse(I(Sleep_Disorder == "Yes"), 
+                                     mean(I(Sleep_Disorder == "Yes")) / ps, 
+                                     (1 - mean(I(Sleep_Disorder == "Yes"))) / (1 - ps)))
+
+# Truncate extreme weights (1st and 99th percentiles)
+final_data_knn$sweightt <- with(final_data_knn, 
+                               pmin(pmax(sweightt, quantile(sweightt, 0.01)), 
+                                    quantile(sweightt, 0.99)))
+
+
+
+# Summary of stabilized weights
+summary(final_data_knn$sweightt)
+
+```
+
+```{r}
+
+
+#cov2 <- c("Age_Group", "Gender", "Race_Ethnicity", "Smoking_Status", 
+ #                 "Physical_Activity", "Saturated_Fat_Intake", "Sugar_Intake", "Diabetes_Status")
+
+#design with truncated stabilized weight
+#design.stab <- svydesign(ids = ~SEQN, weights = ~sweightt, data = final_data_knn)
+
+#balance checking
+#tab.stab2 <- svyCreateCatTable(vars = cov2, strata = "Sleep_Disorder", data = design.stab, test = #F)
+
+#print(tab.stab2, smd = T)
+```
+
+```{r}
+library(tableone)
+
+# Define categorical and continuous variables separately
+cov_categorical <- c("Age_Group", "Gender", "Race_Ethnicity", "Smoking_Status", 
+                     "Marital_Status")
+
+#cov_continuous <- c("Saturated_Fat_Intake", "Sugar_Intake")  # Treat as continuous
+
+# Create table ensuring proper data type handling
+tab.stab2 <- svyCreateTableOne(
+  vars = c(cov_categorical),
+  strata = "Sleep_Disorder",
+  data = design.stab,
+  test = FALSE
+)
+
+# Print with SMD values
+print(tab.stab2, smd = TRUE)
+
+```
+
+```{r}
+dat.fulll <- data_nhanes
+dat.fulll$ind <- 0
+dat.fulll$ind[dat.fulll$SEQN %in% final_data_knn$SEQN] <- 1
+
+# Define new survey weights as (survey weight * PS weight)
+final_data_knn$new.sweightt <- with(final_data_knn, Survey_Weight * sweightt)
+summary(final_data_knn$new.sweightt)
+```
+
+
+```{r}
+dat.fulll$new.sweightt <- 0
+dat.fulll$new.sweightt[dat.fulll$SEQN %in% final_data_knn$SEQN] <- final_data_knn$new.sweightt
+summary(dat.fulll$new.sweightt)
+```
+
+
+```{r}
+# Define survey design with full data
+w.design.ps.knn <- svydesign(
+  id = ~PSU, 
+  strata = ~Stratum,
+  weights = ~new.sweightt,
+  data = dat.fulll, 
+  nest = TRUE
+)
+
+w.design.s2 <- subset(w.design.ps.knn, ind == 1)
+
+```
+
+
+## SMDS after PSW with and w/o survey weights
+```{r}
+#library(cobalt)
+#library(tableone)
+
+# Define covariates to check balance
+#balance_vars <- c("Age_Group", "Gender", "Race_Ethnicity", "Smoking_Status", 
+ #                 "Physical_Activity", "Saturated_Fat_Intake", "Sugar_Intake", "Diabetes_Status")
+
+# **Step 2.1: Create Survey Design Objects**
+# Create survey design before weighting
+#w.design.unweighted <- svydesign(
+ # id = ~SEQN, 
+  #data = final_data_knn, 
+  #nest = TRUE
+#)
+
+# **Step 2.2: Create Balance Tables Before & After Weighting**
+# Table before weighting
+#tab_unweighted <- svyCreateTableOne(vars = balance_vars, strata = "Sleep_Disorder", data = #w.design.unweighted, test = FALSE)
+
+# Table after weighting
+#tab_weighted <- svyCreateTableOne(vars = balance_vars, strata = "Sleep_Disorder", data = #w.design.ps.knn, test = FALSE)
+
+# Print balance tables with Standardized Mean Differences (SMD)
+#print(tab_unweighted, smd = TRUE)
+#print(tab_weighted, smd = TRUE)
+
+```
+
+
+
+```{r}
+# Fit survey-weighted Poisson regression model on PS-weighted data
+model.ps.knn <- svyglm(model.formula, design = w.design.s2, family = poisson(link = "log"))
+
+# Display summary of results
+summary(model.ps.knn)
+
+```
+
+```{r}
+library(kableExtra)
+
+# Function to compute RR, CI, and P-values
+compute_rr_ci <- function(coef, se, p_value) {
+  rr <- exp(coef)
+  ci_lower <- exp(coef - 1.96 * se)
+  ci_upper <- exp(coef + 1.96 * se)
+  data.frame(
+    Risk_Ratio = round(rr, 3),
+    CI_Lower = round(ci_lower, 3),
+    CI_Upper = round(ci_upper, 3),
+    P_Value = format.pval(p_value, digits = 3, eps = 0.001)
+  )
+}
+
+# Extract coefficients & SE
+coef_knn <- model.ps.knn$coefficients
+se_knn <- sqrt(diag(vcov(model.ps.knn)))
+
+# Create results table
+knn_results <- data.frame(
+  Variable = names(coef_knn),
+  Estimate = coef_knn,
+  SE = se_knn
+)
+
+# Compute RR, CI, and P-values
+knn_table <- compute_rr_ci(
+  coef = knn_results$Estimate,
+  se = knn_results$SE,
+  p_value = 2 * pnorm(-abs(knn_results$Estimate / knn_results$SE))
+)
+
+# Merge with variable names
+knn_table <- data.frame(
+  Variable = knn_results$Variable,
+  knn_table
+)
+
+# Format table
+knn_kable <- knn_table %>%
+  kbl(caption = "Risk Ratios, Confidence Intervals, and P-Values (KNN Approach)") %>%
+  kable_classic(full_width = F, html_font = "sans") %>%
+  column_spec(1, bold = T)
+
+# Print the table
+knn_kable
+
+```
+
+```{r}
+library(ggplot2)
+
+# Mark significant variables (P < 0.05)
+knn_table <- knn_table %>%
+  mutate(Significant = ifelse(P_Value < 0.05, "Significant", "Not Significant"))
+
+# Order variables for better visualization
+knn_table$Variable <- factor(knn_table$Variable, levels = knn_table$Variable[order(knn_table$Risk_Ratio)])
+
+# Create a ggplot (Enhanced Forest Plot)
+ggplot(knn_table, aes(x = Variable, y = Risk_Ratio, ymin = CI_Lower, ymax = CI_Upper, color = Significant)) +
+  geom_pointrange(size = 1, fatten = 2) +  # Larger points with thicker lines
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at RR = 1
+  coord_flip() +  # Flip axes for better readability
+  theme_minimal(base_family = "sans") +  
+  theme(
+    axis.title.y = element_blank(),  
+    axis.text.y = element_text(size = 14, face = "bold"),  
+    axis.text.x = element_text(size = 12),
+    legend.position = "top",  
+    legend.text = element_text(size = 12),
+    panel.grid.major.y = element_blank(),  
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Risk Ratios with 95% Confidence Intervals (KNN Approach)",
+    subtitle = "Significant variables highlighted in red",
+    y = "Risk Ratio (95% CI)",
+    color = "Statistical Significance"
+  ) +
+  scale_color_manual(values = c("Not Significant" = "gray70", "Significant" = "red"))
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+
+# Add method labels to each dataset
+mice_table <- mice_table %>%
+  mutate(Method = "MICE")
+
+knn_table <- knn_table %>%
+  mutate(Method = "KNN")
+
+# Combine both datasets
+compare_table <- bind_rows(mice_table, knn_table)
+
+# Calculate the average RR across both methods for sorting
+compare_table <- compare_table %>%
+  group_by(Variable) %>%
+  mutate(Average_RR = mean(Risk_Ratio, na.rm = TRUE)) %>%
+  ungroup()
+
+# Order variables based on the average Risk Ratio (from largest to smallest)
+compare_table$Variable <- factor(compare_table$Variable, levels = unique(compare_table$Variable[order(compare_table$Average_RR)]))
+
+ggplot(compare_table, aes(x = Variable, y = Risk_Ratio, ymin = CI_Lower, ymax = CI_Upper, color = Method)) +
+  geom_pointrange(size = 1.2, position = position_dodge(width = 0.6)) +  # Space out points
+  geom_hline(yintercept = 1, linetype = "dashed", color = "black", linewidth = 1) +  # Reference line at RR = 1
+  coord_flip() +  # Flip axes for better readability
+  theme_minimal(base_family = "sans") +  
+  theme(
+    axis.title.y = element_blank(),
+    axis.text.y = element_text(size = 14, face = "bold"),  # Bold variable names
+    axis.text.x = element_text(size = 12),
+    legend.position = "top",
+    legend.text = element_text(size = 12),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    title = "Comparison of Risk Ratios: MICE vs KNN",
+    subtitle = "Risk Ratios with 95% Confidence Intervals (Sorted by Magnitude)",
+    y = "Risk Ratio (95% CI)",
+    color = "Imputation Method"
+  ) +
+  scale_color_manual(values = c("MICE" = "blue", "KNN" = "red"))
+
+
+```
+
+
+```{r}
+#dat.ps2 <- list(NULL)
+
+#for (ii in 1:m) {
+ # # PS weighted imputed data
+  #dat <- dat.ps[[ii]]
+  
+  # New weight = survey weight * PS weight 
+  #dat$new_weight <- with(dat, Survey_Weight * sweight)
+  
+#  dat.ps2[[ii]] <- dat
+#}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
