@@ -1,0 +1,252 @@
+---
+title: "NHANES PAPER DATA COLLECTION"
+subtitle: "NHANES 2017-2018"
+author: 
+  - "Theophilus G. Baidoo^[tbaidoo@iu.edu, Indiana University Bloomington.]"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  bookdown::pdf_document2:
+    fig_caption: true
+    latex_engine: xelatex
+    number_sections: false
+    toc: false
+    toc_depth: 4
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{amsfonts}
+  - \usepackage{amsthm}
+  - \usepackage{pdfpages}
+  - \usepackage{floatrow}
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \rhead{Theophilus Baidoo}
+  - \lhead{}
+  - \cfoot{\thepage}
+  - \usepackage{algorithm}
+  - \usepackage[noend]{algpseudocode}
+geometry: margin=0.8in
+fontsize: 11pt
+params:
+  proj_number: 
+  proj_title: ""
+---
+
+
+
+```{r, message=FALSE, warning=FALSE}
+library(nhanesA)
+library(dplyr)
+library(ggplot2)
+library(car)  
+```
+
+
+```{r}
+# 2. Function to Safely Download NHANES Data
+safe_nhanes <- function(dataset) {
+  data <- tryCatch(
+    nhanes(dataset),
+    error = function(e) {
+      warning(paste("Failed to download:", dataset))
+      return(NULL)
+    }
+  )
+  return(data)
+}
+```
+
+
+```{r}
+# Relevant NHANES 2017-2018 Datasets
+
+demo <- safe_nhanes("DEMO_J")  # Demographics Data
+sleep <- safe_nhanes("SLQ_J")  # Sleep Data
+alchohol <- safe_nhanes("ALQ_J")  # alcohol Data
+smoke <- safe_nhanes("SMQ_J")  # smoking Data
+diab <- safe_nhanes("DIQ_J")  # Diabetes Data
+depression <- safe_nhanes("DPQ_J")    # Depression Screener
+bmi <- safe_nhanes("BMX_J")           # Body Measurements (BMI)
+physical_activity <- safe_nhanes("PAQ_J")  # Physical Activity
+diet <- safe_nhanes("DR1TOT_J")      # Dietary Intake
+b.pressure <- safe_nhanes("BPQ_J") # Blood pressure
+occu <- safe_nhanes("OCQ_J") # occupation
+lipid <- safe_nhanes("TRIGLY_J") # triclycerids and ldl
+#blood <- safe_nhanes("BPQ_J")
+lipid2 <- safe_nhanes("HDL_J") # hdl
+```
+
+
+```{r}
+
+demo_vars <- demo %>%
+  select(SEQN, RIDAGEYR, RIAGENDR, RIDRETH1, DMDMARTL, WTINT2YR, SDMVPSU, SDMVSTRA, INDFMPIR, DMDEDUC2) # demographics
+
+occu_vars <- occu %>%
+  select(SEQN, OCQ670) # shift work
+
+sleep_vars <- sleep %>%
+  select(SEQN, SLD012, SLQ050, SLD013, SLQ030, SLQ040, SLQ120) # Number of hours usually sleep on weekdays or workdays/ 
+
+alcohol_vars <- alchohol %>%
+  select(SEQN, ALQ130) # # avg alcoholic drinks per/day-12 mons
+
+smoke_vars <- smoke %>%
+  select(SEQN, SMQ040) #Do you now smoke cigarettes?)
+
+diabetes_vars <- diab %>%
+  select(SEQN, DIQ010) # Study participant told by a doctor or health professional that they have diabetes. Reported for participants aged 1 year or older as Yes or No.
+
+depression_vars <- depression %>% select(SEQN, DPQ020)  # Depression severity
+
+bmi_vars <- bmi %>% select(SEQN, BMXBMI)               # Body Mass Index
+
+blood_vars <- b.pressure %>% select(SEQN, BPQ020) #  Ever told you had high blood pressure
+
+physical_activity_vars <- physical_activity %>%
+  select(
+    SEQN,
+    # Work activity
+    PAQ605,   # Vigorous work
+    PAQ620,   # Moderate work
+
+    # Transport
+    PAQ635,    # Walking/biking for transport
+
+    # Leisure-time activity
+    PAQ650,   # Vigorous recreation
+    PAQ665,   # Moderate recreation
+
+    # Sedentary time
+    #PAD680                    # Sedentary activity
+  )
+  # Physical Activity
+
+diet_vars <- diet %>% select(SEQN, DR1TSFAT, DR1TSUGR, DR1TKCAL)  # Saturated Fat and Sugar
+
+tri_vars <- lipid  %>% select(SEQN, LBXTR, LBDLDL) # TRI and ldl (mg/dl)
+
+hdl_vars <- lipid2 %>% select(SEQN, LBDHDD) # DIRECT HDL (MG/DL)
+```
+
+
+```{r}
+
+nhanes_data <- demo_vars %>%
+  inner_join(sleep_vars, by = "SEQN") %>%
+  inner_join(alcohol_vars, by = "SEQN") %>%
+  inner_join(smoke_vars, by = "SEQN") %>%
+  inner_join(diabetes_vars, by = "SEQN") %>%
+  inner_join(bmi_vars, by = "SEQN") %>%
+  inner_join(physical_activity_vars, by = "SEQN") %>%
+  inner_join(diet_vars, by = "SEQN") %>%
+  inner_join(depression_vars, by = "SEQN") %>%
+  inner_join(occu_vars, by = "SEQN") %>%
+  inner_join(blood_vars, by = "SEQN") %>%
+  inner_join(tri_vars, by = "SEQN") %>%
+  inner_join(hdl_vars, by = "SEQN")
+  
+```
+
+
+
+```{r}
+
+# Rename variables in the merged dataset
+
+nhanes_data <- nhanes_data %>%
+  rename(
+    # Demographics
+    age = RIDAGEYR,                        # Age in years at screening
+    gender = RIAGENDR,                     # Gender (1 = Male, 2 = Female)
+    race_ethnicity = RIDRETH1,            # Race/Hispanic origin
+    marital_status = DMDMARTL,            # Marital status
+    interview_weight = WTINT2YR,          # 2-year interview weight
+    psu = SDMVPSU,                         # Pseudo-PSU for variance estimation
+    stratum = SDMVSTRA,                   # Pseudo-stratum for variance estimation
+    income_ratio = INDFMPIR,              # Family income to poverty ratio
+    education = DMDEDUC2,                 # Education level (20+ years)
+
+    # Occupation / Shift Work
+    work_schedule = OCQ670,               # Overall work schedule in past 3 months
+    #fulltime = OCQ210,                    # Usually work 35+ hours per week
+
+    # Sleep variables
+    sleep_weekday = SLD012,               # Sleep hours on weekdays/workdays
+    trouble_sleep = SLQ050,               # Ever told doctor had trouble sleeping
+    sleep_weekend = SLD013,               # Sleep hours on weekends/non-workdays
+    snore = SLQ030,                       # How often do you snore
+    apnea_symptoms = SLQ040,             # How often snort/stop breathing during sleep
+    daytime_sleepy = SLQ120,              # How often feel overly sleepy during the day
+
+    # Alcohol & Smoking
+    alcohol_day = ALQ130,                 # Avg alcoholic drinks per day (past 12 months)
+    current_smoker = SMQ040,              # Do you now smoke cigarettes?
+
+    # Health Conditions
+    diabetes = DIQ010,                    # Ever told you have diabetes
+    hypertension = BPQ020,                # Ever told you have high blood pressure
+    depression = DPQ020,                  # Feeling down, depressed, or hopeless
+
+    # BMI
+    bmi = BMXBMI,                         # Body Mass Index (kg/m^2)
+
+    # Physical Activity - Work
+    work_vigorous = PAQ605,               # Do vigorous-intensity work activity
+    #work_vigorous_days = PAQ610,          # Days/week vigorous work
+    #work_vigorous_minutes = PAD615,       # Minutes/day vigorous work
+
+    work_moderate = PAQ620,               # Do moderate-intensity work activity
+    #work_moderate_days = PAQ625,          # Days/week moderate work
+    #work_moderate_minutes = PAD630,       # Minutes/day moderate work
+
+    # Physical Activity - Transport
+    walk_bike = PAQ635,                   # Walk/bike for transportation
+    #walk_bike_days = PAQ640,              # Days/week walk/bike
+    #walk_bike_minutes = PAD645,           # Minutes/day walk/bike
+
+    # Physical Activity - Leisure
+    leisure_vigorous = PAQ650,            # Do vigorous-intensity recreational activity
+    #leisure_vigorous_days = PAQ655,       # Days/week vigorous recreation
+    #leisure_vigorous_minutes = PAD660,    # Minutes/day vigorous recreation
+
+    leisure_moderate = PAQ665,            # Do moderate-intensity recreational activity
+    #leisure_moderate_days = PAQ670,       # Days/week moderate recreation
+    #leisure_moderate_minutes = PAD675,    # Minutes/day moderate recreation
+
+    # Sedentary Time
+    #sedentary_minutes = PAD680,           # Minutes/day sedentary activity
+
+    # Diet
+    sat_fat = DR1TSFAT,                   # Saturated fat intake (grams)
+    sugar = DR1TSUGR,                     # Total sugars intake (grams)
+    energy_kcal = DR1TKCAL,               # Total energy intake (kcal)
+
+    # Lipids
+    triglycerides = LBXTR,                # Triglycerides (mg/dL)
+    ldl = LBDLDL,                         # LDL cholesterol (mg/dL)
+    hdl = LBDHDD                          # HDL cholesterol (mg/dL)
+  )
+
+
+
+
+colnames(nhanes_data)
+
+```
+```{r}
+head(nhanes_data)
+
+
+write.csv(nhanes_data, file = "merged_dataset.csv", row.names = FALSE)
+
+```
+
+```{r}
+summary(nhanes_data)
+```
+```{r}
+dim(nhanes_data)
+```
+
