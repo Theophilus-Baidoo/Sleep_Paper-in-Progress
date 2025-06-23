@@ -1,0 +1,2634 @@
+---
+title: 'NHANES 2017/2018 Study 2'
+author: 
+  - Theophilus Baidoo^[tbaidoo@iu.edu, Indiana University Bloomington (IUB).]
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  bookdown::pdf_document2:
+    fig_caption: true
+    latex_engine: xelatex
+    number_sections: true
+    toc: true
+    toc_depth: 4
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{amsfonts}
+  - \usepackage{amsthm}
+  - \usepackage{floatrow}
+  - \usepackage{fancyhdr}
+  - \pagestyle{fancy}
+  - \fancyhf{}
+  - \rhead{Theophilus Baidoo}
+  - \lhead{Project `r params$proj_number` -- `r params$proj_title`}
+  - \cfoot{\thepage}
+  - \usepackage{algorithm}
+  - \usepackage[noend]{algpseudocode}
+geometry: margin = 0.8in
+fontsize: 10pt
+params:
+  proj_number: I
+  proj_title: NHANES Study 2
+---
+
+
+```{r, message=FALSE, warning=FALSE}
+
+library(tidyverse)
+library(naniar)
+library(VIM)
+library(DataExplorer)
+library(mice)
+library(DMwR2)
+library(dplyr)
+library(ggplot2)
+library(gtsummary)
+library(gt)
+library(mitools)
+library(survey)
+library(cobalt)
+library(MatchIt)
+library(tableone)
+library(geepack)
+library(epiR)
+library(tidyverse)
+library(fs)
+library(tableone)
+library(table1)
+library(flextable)
+library(tableone)
+library(dplyr)
+library(flextable)
+library(officer)
+library(tibble)
+library(MatchIt)
+library(broom)
+library(flextable)
+library(cobalt)
+library(ggplot2)
+library(jtools)
+
+
+set.seed(100)
+```
+
+
+```{r}
+
+data_nhanes <- readRDS("nhanes_cleandata.rds")
+dim(data_nhanes)
+names(data_nhanes)
+```
+
+```{r}
+data_nhanes <- data_nhanes %>%
+  rename(Exposure = trouble_sleep) 
+
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    marital_status = case_when(
+      marital_status %in% c("Never married", "Divorced", "Living with partner", "Widowed", "Separated") ~ "Not Married",
+      marital_status == "Married" ~ "Married",
+      marital_status == "Refused" ~ NA_character_,
+      TRUE ~ as.character(marital_status)  # preserves existing NA
+    ),
+    marital_status = factor(marital_status, levels = c("Married", "Not Married"))
+  )
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    current_smoker = case_when(
+      current_smoker %in% c("Every day", "Some days") ~ "Smoker",
+      current_smoker == "Not at all" ~ "Non-Smoker",
+      TRUE ~ as.character(current_smoker)  # preserves NA
+    ),
+    current_smoker = factor(current_smoker, levels = c("Smoker", "Non-Smoker"))
+  )
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    race_ethnicity = case_when(
+      race_ethnicity %in% c("Mexican American", "Other Hispanic") ~ "Hispanic",
+      race_ethnicity == "Non-Hispanic Black" ~ "Non-Hispanic Black",
+      race_ethnicity == "Non-Hispanic White" ~ "Non-Hispanic White",
+      race_ethnicity == "Other Race - Including Multi-Racial" ~ "Other",
+      TRUE ~ as.character(race_ethnicity)  # preserves NA
+    ),
+    race_ethnicity = factor(race_ethnicity, levels = c("Non-Hispanic White", "Non-Hispanic Black", "Hispanic", "Other"))
+  )
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    diabetes = case_when(
+      diabetes == "Yes" ~ "Diabetic",
+      diabetes %in% c("No", "Borderline") ~ "Not Diabetic",
+      TRUE ~ as.character(diabetes)  # preserves NA
+    ),
+    diabetes = factor(diabetes, levels = c("Diabetic", "Not Diabetic"))
+  )
+
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    Obesity = case_when(
+      is.na(bmi) ~ NA_character_,  # Preserve missing values
+      bmi >= 30 ~ "Obese",
+      bmi < 30 ~ "Not Obese"
+    ),
+    Obesity = factor(Obesity, levels = c("Not Obese", "Obese"))  # Convert to factor
+  )
+
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    Age_Group = cut(age, 
+      breaks = quantile(age, probs = c(0, 1/3, 2/3, 1), na.rm = TRUE), 
+      include.lowest = TRUE, 
+      labels = c("18-39", "40-61", "62+"))
+  )
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    # HDL: Low if <40 (men) or <50 (women)
+    hdl = case_when(
+      gender == "Male" & hdl < 40 ~ "Low",
+      gender == "Female" & hdl < 50 ~ "Low",
+      !is.na(hdl) ~ "Normal",
+      TRUE ~ NA_character_
+    ),
+    hdl = factor(hdl, levels = c("Normal", "Low")),
+
+    # LDL: High if >= 130 mg/dL
+    ldl = case_when(
+      ldl >= 130 ~ "High",
+      !is.na(ldl) ~ "Normal",
+      TRUE ~ NA_character_
+    ),
+    ldl = factor(ldl, levels = c("Normal", "High")),
+
+    # Triglycerides: Cap at 1000, then classify
+    triglycerides = ifelse(triglycerides > 1000, 1000, triglycerides),
+    triglycerides = case_when(
+      triglycerides >= 150 ~ "Elevated",
+      !is.na(triglycerides) ~ "Normal",
+      TRUE ~ NA_character_
+    ),
+    triglycerides = factor(triglycerides, levels = c("Normal", "Elevated"))
+  )
+
+
+data_nhanes$alcohol_cat <- cut(
+  data_nhanes$alcohol_day,
+  breaks = c(0, 2, Inf),
+  labels = c("1–2/day", "3+/day"),
+  right = TRUE
+)
+
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    education = case_when(
+      education %in% c("Less than 9th grade", 
+                       "9-11th grade (Includes 12th grade with no diploma)") ~ "Less than high school",
+      education == "High school graduate/GED or equivalent" ~ "High school/GED",
+      education == "Some college or AA degree" ~ "Some college",
+      education == "College graduate or above" ~ "College graduate",
+      TRUE ~ NA_character_  # Keep missing as NA
+    ),
+    education = factor(education, levels = c(
+      "Less than high school", 
+      "High school/GED", 
+      "Some college", 
+      "College graduate"
+    ))
+  )
+data_nhanes <- data_nhanes %>%
+  mutate(
+    apnea_symptoms = case_when(
+      apnea_symptoms == "Never" ~ "No reported apnea symptoms",
+      apnea_symptoms %in% c(
+        "Rarely - 1-2 nights a week",
+        "Occasionally - 3-4 nights a week",
+        "Frequently - 5 or more nights a week"
+      ) ~ "Reported apnea symptoms",
+      TRUE ~ NA_character_
+    ),
+    apnea_symptoms = factor(
+      apnea_symptoms,
+      levels = c("No reported apnea symptoms", "Reported apnea symptoms")
+    )
+  )
+
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    daytime_sleepy = case_when(
+      daytime_sleepy == "Never" ~ "Never",
+      daytime_sleepy %in% c(
+        "Rarely - 1 time a month",
+        "Sometimes - 2-4 times a month",
+        "Often- 5-15 times a month"
+      ) ~ "Occasional",
+      daytime_sleepy == "Almost always - 16-30 times a month" ~ "Frequent",
+      TRUE ~ NA_character_  # Keep missing as NA
+    ),
+    daytime_sleepy = factor(daytime_sleepy, levels = c("Never", "Occasional", "Frequent"))
+  )
+data_nhanes <- data_nhanes %>%
+  mutate(
+    depression = case_when(
+      depression == "Not at all" ~ "None",
+      depression == "Several days" ~ "Mild",
+      depression %in% c("More than half the days", "Nearly every day") ~ "Moderate/Severe",
+      TRUE ~ NA_character_
+    ),
+    depression = factor(depression, levels = c("None", "Mild", "Moderate/Severe"))
+  )
+data_nhanes <- data_nhanes %>%
+  mutate(
+    work_schedule = case_when(
+      work_schedule == "Traditional 9 AM to 5 PM day" ~ "Daytime job",
+      work_schedule %in% c(
+        "Early mornings",
+        "Evening or nights",
+        "Variable (early mornings, days, and nights)"
+      ) ~ "Non-daytime job",
+      TRUE ~ NA_character_
+    ),
+    work_schedule= factor(work_schedule, levels = c("Daytime job", "Non-daytime job"))
+  )
+
+
+data_nhanes <- data_nhanes %>%
+  mutate(
+    snore = case_when(
+      snore == "Frequently - 5 or more nights a week" ~ "Frequent",
+      snore %in% c("Occasionally - 3-4 nights a week", "Rarely - 1-2 nights a week") ~ "Occasional",
+      snore == "Never" ~ "Never",
+      TRUE ~ NA_character_
+    ),
+    snore = factor(snore, levels = c("Never", "Occasional", "Frequent"))
+  )
+
+```
+
+
+```{r}
+data_nhanes$dyslipidemia <- with(data_nhanes, 
+  ifelse(ldl == "High" | hdl == "Low" | triglycerides == "Elevated", "Yes",
+         ifelse(!is.na(ldl) & !is.na(hdl) & !is.na(triglycerides), "No", NA))
+)
+
+data_nhanes$dyslipidemia <- factor(data_nhanes$dyslipidemia, levels = c("No", "Yes"))
+
+
+data_nhanes$physically_active <- with(data_nhanes, ifelse(
+  work_vigorous == "Yes" |
+  work_moderate == "Yes" |
+  walk_bike == "Yes" |
+  leisure_vigorous == "Yes" |
+  leisure_moderate == "Yes",
+  "Yes",
+  ifelse(
+    !is.na(work_vigorous) & !is.na(work_moderate) &
+    !is.na(walk_bike) & !is.na(leisure_vigorous) & !is.na(leisure_moderate),
+    "No", NA)
+))
+
+data_nhanes$physically_active <- factor(data_nhanes$physically_active, levels = c("No", "Yes"))
+
+
+```
+
+
+
+```{r}
+data_nhanes <- data_nhanes %>% select(
+  -bmi, -alcohol_day, -age, -ldl, -hdl, -triglycerides,
+  -work_vigorous, -work_moderate, -walk_bike, -leisure_vigorous, -leisure_moderate
+)
+
+```
+
+
+
+
+```{r}
+n_total <- nrow(data_nhanes)
+
+
+model1_vars <- c("Obesity", "Exposure", "Age_Group", "gender", "race_ethnicity", "income_ratio", "education", "work_schedule")
+n_model1 <- sum(complete.cases(data_nhanes[, model1_vars]))
+
+
+model2_vars <- c(model1_vars, "physically_active", "sat_fat", "sugar", "alcohol_cat", 
+                 "dyslipidemia", "hypertension", "depression", "diabetes")
+n_model2 <- sum(complete.cases(data_nhanes[, model2_vars]))
+
+
+model3_vars <- c(model2_vars, "apnea_symptoms", "snore", "sleep_weekday", "sleep_weekend")
+n_model3 <- sum(complete.cases(data_nhanes[, model3_vars]))
+
+
+cat("Total participants:", n_total, "\n")
+cat("Complete cases for Model 1:", n_model1, "\n")
+cat("Complete cases for Model 2:", n_model2, "\n")
+cat("Complete cases for Model 3:", n_model3, "\n")
+
+```
+
+
+
+
+
+# Complete Case Analysis for Model 1
+
+
+
+```{r}
+# All variables across all models
+vars_all_models <- c(
+  "Obesity", "Exposure",            # Outcome & exposure
+  "Age_Group", "gender", "race_ethnicity", "income_ratio", "education", "work_schedule",  # Model 1
+  "physically_active", "sat_fat", "sugar","energy_kcal", "alcohol_cat", 
+  "dyslipidemia", "hypertension", "depression", "diabetes",                        # Model 2
+  "apnea_symptoms","snore", "sleep_weekday", "sleep_weekend"  # Model 3
+)
+
+# Complete-case data for all models
+complete_cases_all_models2 <- data_nhanes %>%
+  drop_na(all_of(vars_all_models))
+
+
+saveRDS(complete_cases_all_models2, "results/complete_case_all_models2.rds")
+
+```
+
+
+
+
+```{r, include=FALSE}
+analysis_vars <- c(
+  "SEQN","Obesity", "Exposure",            # Outcome & exposure
+  "Age_Group", "gender", "race_ethnicity", "Age_Group", "income_ratio", "education", "work_schedule","psu", "stratum","interview_weight",  # Model 1
+   "physically_active", "energy_kcal", "sat_fat", "sugar", "alcohol_cat", 
+  "dyslipidemia", "hypertension", "depression", "diabetes",                        # Model 2
+  "apnea_symptoms","snore", "sleep_weekday", "sleep_weekend"  # Model 3
+)
+
+analysis_data <- complete_cases_all_models2 %>%
+  select(all_of(analysis_vars))
+
+
+
+```
+
+
+
+```{r}
+# Drop design variables from the display set
+vars_display <- setdiff(colnames(analysis_data), c("SEQN","psu", "stratum", "interview_weight"))
+
+# Create table using only the selected variables
+table_data <- analysis_data %>%
+  select(all_of(vars_display))
+
+# Create Table 1
+sum_table <- table1(~ . | Exposure, data = table_data)
+
+# Save to Word
+t1flex(sum_table) %>%
+  save_as_docx(path = "results/table1_complete_cases2.docx")
+
+
+
+```
+
+
+
+
+```{r}
+
+mis_df <- data_nhanes %>%
+  mutate(
+    group = ifelse(complete.cases(across(all_of(vars_display))), "Complete Data", "Incomplete Data")
+  )
+
+
+tab_ <- CreateTableOne(
+  vars = vars_display,
+  strata = "group",
+  data = mis_df,
+  test = TRUE,
+  addOverall = FALSE
+)
+
+
+mis_sum <- as.data.frame(print(tab_,
+                               quote = FALSE,
+                               noSpaces = TRUE,
+                               printToggle = FALSE)) %>%
+  rownames_to_column("Variable")
+
+
+flextable(mis_sum) %>%
+  save_as_docx(path = "results/s1_table2.docx")
+
+
+```
+
+
+
+## Analyzing Complete Case dataset
+
+
+# Building model 1
+
+```{r}
+covars <- intersect(colnames(analysis_data), c("Age_Group", "education", "gender", "marital_status", "race_ethnicity", "income_ratio"))
+exposure <- "Exposure"
+```
+
+
+```{r}
+library(tableone)
+library(ggpubr)
+
+tabUnmatched <- CreateTableOne(vars = covars, strata = exposure, 
+                               data = analysis_data, test = FALSE,addOverall = TRUE)
+
+df <- as.data.frame(print(tabUnmatched, smd = TRUE))
+
+df <- ggtexttable(df, 
+                  theme = ttheme("blank", padding = unit(c(8, 8), "mm"),
+                                 tbody.style = tbody_style(fill="white", 
+                                                           fontface = "plain",
+                                                           hjust=1, x=1,size = 12,),
+                                 rownames.style = rownames_style(
+                                   color = "black",
+                                   face = "plain"
+                                 ),
+                                 colnames.style = colnames_style(
+                                   hjust=0,
+                                   fill="white")))%>%
+  tab_add_hline(at.row = 3, row.side = "top", linewidth = 1)%>%
+  tab_add_hline(at.row = 1, row.side = "top", linewidth = 1)%>%
+  tab_add_hline(at.row = nrow(df), row.side = "bottom", linewidth = 1)
+
+
+ggsave(filename = "figures/descriptive2.pdf",
+       plot = df, dpi = 300, bg = "transparent", 
+       device = "pdf",width = 9,height = 12)
+```
+
+
+
+
+```{r}
+
+covarss <- intersect(colnames(analysis_data), c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio", "psu", "stratum", "interview_weight"))
+exposure <- "Exposure"
+
+
+ps.formula <- as.formula(paste(exposure, "~", paste(covarss, collapse = " + ")))
+
+# Fit the PS model
+ps.fit <- glm(ps.formula, data = analysis_data, family = binomial("logit"))
+
+# Generate propensity scores
+analysis_data$ps <- fitted(ps.fit, type = "response")
+
+```
+
+
+```{r}
+# Calculate stabilized weights
+analysis_data$sweightt <- with(analysis_data, 
+                              ifelse(I(Exposure == "Yes"), 
+                                     mean(I(Exposure == "Yes")) / ps, 
+                                     (1 - mean(I(Exposure == "Yes"))) / (1 - ps)))
+
+# Truncate extreme weights (1st and 99th percentiles)
+analysis_data$sweightt <- with(analysis_data, 
+                               pmin(pmax(sweightt, quantile(sweightt, 0.01)), 
+                                    quantile(sweightt, 0.99)))
+
+
+
+# Summary of stabilized weights
+summary(analysis_data$sweightt)
+
+```
+
+```{r}
+density.p <- ggdensity(analysis_data, x = "ps", fill = "Exposure", palette = c("#66c2a5", "#fc8d62")) +
+  labs(x = "Propensity Scores",fill = "Exposure") +
+  theme_classic()+
+  theme(legend.position = "inside",
+        legend.position.inside =  c(.89, .85),
+        legend.background = element_rect(color = "grey", fill = "white"),
+        legend.title = element_text(size = 25),
+        legend.text = element_text(size = 25),
+        legend.key.size = unit(1, "cm"),
+        axis.title.x = element_text(size = 30, margin = margin(t = 20)),
+        axis.title.y = element_text(size = 30, margin = margin(r = 20)),
+        axis.text = element_text(size = 25),
+        strip.text = element_text(size = 25),
+        plot.title = element_text(size = 35,hjust=0,margin = margin(b = 15)),
+        plot.margin = margin(0,0,0,0))
+density.p
+ggsave(filename = "figures/psplot.pdf", plot = density.p, device = "pdf",
+       dpi = 300, width = 15.5, height = 13, units = "in")
+```
+
+
+```{r}
+library(tableone)
+
+
+cov2 <- c("gender", "race_ethnicity", "education", "income_ratio",
+         "Age_Group")
+
+design.stab <- svydesign(ids = ~SEQN, weights = ~sweightt, data = analysis_data)
+
+
+# Create table ensuring proper data type handling
+tab.stab2 <- svyCreateTableOne(
+  vars = cov2,
+  strata = "Exposure",
+  data = design.stab,
+  test = FALSE
+)
+
+# Print with SMD values
+print(tab.stab2, smd = TRUE)
+```
+
+All SMDs are less than our specified cut-point of 0.2.
+
+
+
+
+```{r}
+
+formula <- Exposure ~ gender + race_ethnicity + education + income_ratio + Age_Group
+
+label <- c(
+  gender = "Gender",
+  race_ethnicity = "Race/Ethnicity",
+  #marital_status = "Marital Status",
+  education = "Education",
+  income_ratio = "Income Ratio",
+  Age_Group = "Age Group"
+  #work_schedule = "Work Schedule"
+)
+
+
+p <- love.plot(formula,
+               weights = analysis_data$sweightt,
+               data = analysis_data,
+               method = "weighting",
+               thresholds = c(m = 0.2),
+               abs = FALSE,
+               shapes = c("circle filled", "triangle filled"),
+               colors = c("orange", "green"),
+               e.names = c("Original", "Weighted (IPW)"),
+               size = 7,
+               binary = "std",
+               continuous = "std",
+               s.d.denom = "pooled",
+               var.names = label)
+
+
+p <- p + scale_shape_manual(values = c(4, 2)) +
+  theme(legend.position = "right",
+        legend.position.inside = c(.89, .93),
+        legend.background = element_rect(color = "grey", fill = "white"),
+        legend.title = element_text(size = 25),
+        legend.text = element_text(size = 25),
+        legend.key.size = unit(1, "cm"),
+        axis.title.x = element_text(size = 30, margin = margin(t = 20)),
+        axis.text = element_text(size = 25),
+        strip.text = element_text(size = 25),
+        plot.margin = margin(10, 20, 10, 20)) +
+  labs(title = "")
+
+# Add coordinate limits here
+#p <- p + coord_cartesian(xlim = c(-1, 1))
+ggsave(filename = "figures/balplot2.pdf", plot = p, device = "pdf",
+       dpi = 300, width = 18, height = 13, units = "in")
+ggsave(
+  filename = "figures/balplot_final.png",
+  plot = p + coord_cartesian(xlim = c(-0.35, 0.35)) +
+         theme(legend.position = "bottom"),
+  width = 8,
+  height = 10,
+  units = "in",
+  dpi = 300
+)
+
+```
+
+
+```{r}
+#saveRDS(analysis_data, file = "results/weighted_analysis_data.rds")
+```
+
+```{r}
+analysis_data$new.sweightt <- analysis_data$interview_weight * analysis_data$sweightt
+
+w.design.s2 <- svydesign(
+  id = ~psu,
+  strata = ~stratum,
+  weights = ~new.sweightt,
+  data = analysis_data,
+  nest = TRUE
+)
+
+```
+
+
+
+# Adjusted model 1
+
+```{r}
+model.formula <- as.formula(I(Obesity == 'Obese') ~ Exposure + gender + race_ethnicity + 
+                             Age_Group + education + income_ratio
+                             )
+```
+
+
+```{r}
+
+
+model.ps2 <- svyglm(model.formula, design = w.design.s2, family = poisson(link = "log"))
+
+
+summary(model.ps2)
+```
+```{r}
+summ(model.ps2, exp = TRUE, confint = TRUE, digits = 3)
+```
+
+
+```{r}
+library(broom)
+
+tidy(model.ps2, exponentiate = TRUE, conf.int = TRUE)
+```
+
+
+
+
+```{r}
+library(kableExtra)
+```
+
+
+```{r}
+est <- coef(model.ps2)
+rr <- exp(est)
+
+# Get 95% CIs using survey-adjusted method
+ci <- confint(model.ps2)
+ci_exp <- exp(ci)
+
+# Get p-values from the model summary
+coef_summary <- summary(model.ps2)$coefficients
+p_values <- coef_summary[, "Pr(>|t|)"]
+
+# Combine all into a table
+rr_table <- data.frame(
+  Variable = names(rr),
+  Risk_Ratio = round(rr, 3),
+  CI_Lower = round(ci_exp[, 1], 3),
+  CI_Upper = round(ci_exp[, 2], 3),
+  P_Value = format.pval(p_values, digits = 3, eps = 0.001)
+)
+
+
+completekable <- rr_table %>%
+  kbl(caption = "Risk Ratios, Confidence Intervals, and P-Values (Survey-Adjusted Poisson Model)",
+      align = "lcccc") %>%
+  kable_classic(full_width = F, html_font = "sans") %>%
+  column_spec(1, bold = TRUE)
+
+
+completekable
+
+
+```
+
+
+
+##  Building Model 2
+
+
+
+```{r}
+covarss <- intersect(colnames(analysis_data), c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","physically_active", "sat_fat","energy_kcal", "sugar","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes"))
+exposure <- "Exposure"
+```
+
+
+```{r}
+
+library(ggpubr)
+
+tabUnmatched2 <- CreateTableOne(vars = covarss, strata = exposure, 
+                               data = analysis_data, test = FALSE,addOverall = TRUE)
+
+df2 <- as.data.frame(print(tabUnmatched2, smd = TRUE))
+
+df2 <- ggtexttable(df2, 
+                  theme = ttheme("blank", padding = unit(c(8, 8), "mm"),
+                                 tbody.style = tbody_style(fill="white", 
+                                                           fontface = "plain",
+                                                           hjust=1, x=1,size = 12,),
+                                 rownames.style = rownames_style(
+                                   color = "black",
+                                   face = "plain"
+                                 ),
+                                 colnames.style = colnames_style(
+                                   hjust=0,
+                                   fill="white")))%>%
+  tab_add_hline(at.row = 3, row.side = "top", linewidth = 1)%>%
+  tab_add_hline(at.row = 1, row.side = "top", linewidth = 1)%>%
+  tab_add_hline(at.row = nrow(df), row.side = "bottom", linewidth = 1)
+
+
+ggsave(filename = "figures/descriptive2.pdf",
+       plot = df2, dpi = 300, bg = "transparent", 
+       device = "pdf",width = 9,height = 12)
+```
+
+
+```{r}
+
+covarsss <- intersect(colnames(analysis_data), c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","physically_active", "sat_fat", "energy_kcal", "sugar","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes", "psu", "stratum", "interview_weight"))
+exposure <- "Exposure"
+
+# Specify the Propensity Score model
+ps.formula2 <- as.formula(paste(exposure, "~", paste(covarsss, collapse = " + ")))
+
+# Fit the PS model
+ps.fit2 <- glm(ps.formula2, data = analysis_data, family = binomial("logit"))
+
+# Generate propensity scores
+analysis_data$ps2 <- fitted(ps.fit2, type = "response")
+
+```
+
+
+```{r}
+# Calculate stabilized weights
+analysis_data$m2.sweightt <- with(analysis_data, 
+                              ifelse(I(Exposure == "Yes"), 
+                                     mean(I(Exposure == "Yes")) / ps2, 
+                                     (1 - mean(I(Exposure == "Yes"))) / (1 - ps2)))
+
+# Truncate extreme weights (1st and 99th percentiles)
+analysis_data$m2.sweightt <- with(analysis_data, 
+                               pmin(pmax(m2.sweightt, quantile(m2.sweightt, 0.01)), 
+                                    quantile(m2.sweightt, 0.99)))
+
+
+
+# Summary of stabilized weights
+summary(analysis_data$m2.sweightt)
+
+```
+
+```{r}
+density.p2 <- ggdensity(analysis_data, x = "ps2", fill = "Exposure", palette = c("#66c2a5", "#fc8d62")) +
+  labs(x = "Propensity Scores",fill = "Exposure") +
+  theme_classic()+
+  theme(legend.position = "inside",
+        legend.position.inside =  c(.89, .85),
+        legend.background = element_rect(color = "grey", fill = "white"),
+        legend.title = element_text(size = 25),
+        legend.text = element_text(size = 25),
+        legend.key.size = unit(1, "cm"),
+        axis.title.x = element_text(size = 30, margin = margin(t = 20)),
+        axis.title.y = element_text(size = 30, margin = margin(r = 20)),
+        axis.text = element_text(size = 25),
+        strip.text = element_text(size = 25),
+        plot.title = element_text(size = 35,hjust=0,margin = margin(b = 15)),
+        plot.margin = margin(0,0,0,0))
+
+density.p2
+ggsave(filename = "figures/psplot2.pdf", plot = density.p2, device = "pdf",
+       dpi = 300, width = 15.5, height = 13, units = "in")
+```
+
+```{r}
+library(tableone)
+
+
+cov22 <- c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio" ,"physically_active", "sat_fat", "sugar","energy_kcal","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes")
+
+design.stab2 <- svydesign(ids = ~SEQN, weights = ~m2.sweightt, data = analysis_data)
+
+
+# Create table ensuring proper data type handling
+tab.stab22 <- svyCreateTableOne(
+  vars = cov22,
+  strata = "Exposure",
+  data = design.stab2,
+  test = FALSE
+)
+
+# Print with SMD values
+print(tab.stab22, smd = TRUE)
+
+```
+
+
+```{r}
+library(cobalt)
+library(ggplot2)
+
+# Define formula and labels
+formula2 <- Exposure ~ gender + race_ethnicity  + education + income_ratio + Age_Group + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes
+
+label <- c(
+  gender = "Gender",
+  race_ethnicity = "Race/Ethnicity",
+  #marital_status = "Marital Status",
+  education = "Education",
+  income_ratio = "Income Ratio",
+  Age_Group = "Age Group",
+  #work_schedule = "Work Schedule",
+  #current_smoker = "Current Smoker",
+  physically_active = "Phy.Active",
+  sat_fat = "Saturated Fat",
+  sugar = "Saturated Sugar",
+  alcohol_cat = "alcohol"
+)
+
+# Love plot
+p2 <- love.plot(formula2,
+               weights = analysis_data$m2.sweightt,
+               data = analysis_data,
+               method = "weighting",
+               thresholds = c(m = 0.2),
+               abs = FALSE,
+               shapes = c("circle filled", "triangle filled"),
+               colors = c("orange", "green"),
+               e.names = c("Original", "Weighted (IPW)"),
+               size = 7,
+               binary = "std",
+               continuous = "std",
+               s.d.denom = "pooled",
+               var.names = label)
+
+# Styling
+p2 <- p2 + scale_shape_manual(values = c(4, 2)) +
+  theme(legend.position = "right",
+        legend.position.inside = c(.89, .93),
+        legend.background = element_rect(color = "grey", fill = "white"),
+        legend.title = element_text(size = 25),
+        legend.text = element_text(size = 25),
+        legend.key.size = unit(1, "cm"),
+        axis.title.x = element_text(size = 30, margin = margin(t = 20)),
+        axis.text = element_text(size = 25),
+        strip.text = element_text(size = 25),
+        plot.margin = margin(10, 20, 10, 20)) +
+  labs(title = "")
+
+p2
+# Save plot
+#ggsave(filename = "figures/balplot2.pdf", plot = p2, device = "pdf",
+ #      dpi = 300, width = 18, height = 13, units = "in")
+
+```
+
+
+```{r}
+analysis_data$m2.new.sweightt <- analysis_data$interview_weight * analysis_data$m2.sweightt
+
+w.design.s3 <- svydesign(
+  id = ~psu,
+  strata = ~stratum,
+  weights = ~m2.new.sweightt,
+  data = analysis_data,
+  nest = TRUE
+)
+
+```
+
+
+
+
+```{r}
+model.formula2 <- as.formula(I(Obesity == 'Obese') ~ Exposure + gender + race_ethnicity + 
+                             Age_Group + education + income_ratio + physically_active + sat_fat + sugar + energy_kcal + alcohol_cat + dyslipidemia + hypertension + depression + diabetes
+                             )
+```
+
+
+```{r}
+#Double adjustment
+# Fit survey-weighted Poisson regression model on PS-weighted data
+model.ps3 <- svyglm(model.formula2, design = w.design.s3, family = poisson(link = "log"))
+
+# Display summary of results
+summary(model.ps3)
+```
+
+
+```{r}
+summ(model.ps3, exp = TRUE, confint = TRUE, digits = 3)
+```
+```{r}
+summary(model.ps3, df.resid = degf(w.design.s3))
+```
+
+
+```{r}
+# 1. Get corrected summary with valid p-values
+corrected_summary <- summary(model.ps3, df.resid = degf(w.design.s3))
+
+# 2. Extract coefficients and CIs manually
+coefs <- coef(corrected_summary)
+ses <- sqrt(diag(vcov(model.ps3)))  # std errors
+pvals <- coef(summary(model.ps3, df.resid = degf(w.design.s3)))[, 4]  # corrected p-values
+
+# 3. Create dataframe with exponentiated estimates and CI
+results_df <- as.data.frame(coefs)
+results_df$RR <- exp(results_df$Estimate)
+results_df$CI_lower <- exp(results_df$Estimate - 1.96 * ses)
+results_df$CI_upper <- exp(results_df$Estimate + 1.96 * ses)
+results_df$p_value <- format.pval(pvals, digits = 3, eps = 0.001)
+
+# 4. Clean up
+results_df <- results_df[, c("RR", "CI_lower", "CI_upper", "p_value")]
+results_df$Variable <- rownames(coefs)
+rownames(results_df) <- NULL
+
+# 5. Optional: rearrange columns
+results_df <- results_df[, c("Variable", "RR", "CI_lower", "CI_upper", "p_value")]
+
+# 6. View result
+print(results_df)
+
+
+
+```
+
+
+
+
+# Building model 3
+
+
+
+```{r}
+covarss2 <- intersect(colnames(analysis_data), c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","work_schedule","physically_active", "sat_fat", "energy_kcal", "apnea_symptoms", "sugar","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes", "snore", "sleep_weekday","sleep_weekend"))
+exposure <- "Exposure"
+```
+
+
+```{r}
+
+library(ggpubr)
+
+tabUnmatched3 <- CreateTableOne(vars = covarss2, strata = exposure, 
+                               data = analysis_data, test = FALSE,addOverall = TRUE)
+
+df3 <- as.data.frame(print(tabUnmatched3, smd = TRUE))
+
+df3 <- ggtexttable(df3, 
+                  theme = ttheme("blank", padding = unit(c(8, 8), "mm"),
+                                 tbody.style = tbody_style(fill="white", 
+                                                           fontface = "plain",
+                                                           hjust=1, x=1,size = 12,),
+                                 rownames.style = rownames_style(
+                                   color = "black",
+                                   face = "plain"
+                                 ),
+                                 colnames.style = colnames_style(
+                                   hjust=0,
+                                   fill="white")))%>%
+  tab_add_hline(at.row = 3, row.side = "top", linewidth = 1)%>%
+  tab_add_hline(at.row = 1, row.side = "top", linewidth = 1)%>%
+  tab_add_hline(at.row = nrow(df), row.side = "bottom", linewidth = 1)
+
+
+ggsave(filename = "figures/descriptive3.pdf",
+       plot = df3, dpi = 300, bg = "transparent", 
+       device = "pdf",width = 9,height = 12)
+```
+
+
+```{r}
+
+covarsss3 <- intersect(colnames(analysis_data), c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","work_schedule","physically_active", "sat_fat", "energy_kcal", "apnea_symptoms", "sugar","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes", "snore", "sleep_weekday","sleep_weekend"))
+exposure <- "Exposure"
+
+# Specify the Propensity Score model
+ps.formula3 <- as.formula(paste(exposure, "~", paste(covarsss3, collapse = " + ")))
+
+# Fit the PS model
+ps.fit3 <- glm(ps.formula3, data = analysis_data, family = binomial("logit"))
+
+# Generate propensity scores
+analysis_data$ps3 <- fitted(ps.fit3, type = "response")
+
+```
+
+
+```{r}
+# Calculate stabilized weights
+analysis_data$m3.sweightt <- with(analysis_data, 
+                              ifelse(I(Exposure == "Yes"), 
+                                     mean(I(Exposure == "Yes")) / ps3, 
+                                     (1 - mean(I(Exposure == "Yes"))) / (1 - ps3)))
+
+# Truncate extreme weights (1st and 99th percentiles)
+analysis_data$m3.sweightt <- with(analysis_data, 
+                               pmin(pmax(m3.sweightt, quantile(m3.sweightt, 0.01)), 
+                                    quantile(m3.sweightt, 0.99)))
+
+
+
+# Summary of stabilized weights
+summary(analysis_data$m3.sweightt)
+
+```
+
+```{r}
+density.p3 <- ggdensity(analysis_data, x = "ps3", fill = "Exposure", palette = c("#66c2a5", "#fc8d62")) +
+  labs(x = "Propensity Scores",fill = "Exposure") +
+  theme_classic()+
+  theme(legend.position = "inside",
+        legend.position.inside =  c(.89, .85),
+        legend.background = element_rect(color = "grey", fill = "white"),
+        legend.title = element_text(size = 25),
+        legend.text = element_text(size = 25),
+        legend.key.size = unit(1, "cm"),
+        axis.title.x = element_text(size = 30, margin = margin(t = 20)),
+        axis.title.y = element_text(size = 30, margin = margin(r = 20)),
+        axis.text = element_text(size = 25),
+        strip.text = element_text(size = 25),
+        plot.title = element_text(size = 35,hjust=0,margin = margin(b = 15)),
+        plot.margin = margin(0,0,0,0))
+
+density.p3
+ggsave(filename = "figures/psplot3.pdf", plot = density.p3, device = "pdf",
+       dpi = 300, width = 15.5, height = 13, units = "in")
+```
+
+```{r}
+library(tableone)
+
+
+cov222 <- c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","work_schedule","physically_active", "sat_fat", "energy_kcal", "apnea_symptoms", "sugar","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes", "snore", "sleep_weekday","sleep_weekend")
+
+design.stab3 <- svydesign(ids = ~SEQN, weights = ~m3.sweightt, data = analysis_data)
+
+
+# Create table ensuring proper data type handling
+tab.stab222 <- svyCreateTableOne(
+  vars = cov222,
+  strata = "Exposure",
+  data = design.stab3,
+  test = FALSE
+)
+
+# Print with SMD values
+print(tab.stab222, smd = TRUE)
+
+```
+
+
+```{r}
+library(cobalt)
+library(ggplot2)
+
+# Define formula and labels
+formula3 <- Exposure ~ gender + race_ethnicity  + education + income_ratio + Age_Group + work_schedule + energy_kcal  + physically_active + sat_fat + sugar + alcohol_cat + dyslipidemia + hypertension + depression + diabetes + apnea_symptoms + snore + sleep_weekday + sleep_weekend 
+
+label <- c(
+  gender = "Gender",
+  race_ethnicity = "Race/Ethnicity",
+  #marital_status = "Marital Status",
+  education = "Education",
+  income_ratio = "Income Ratio",
+  Age_Group = "Age Group",
+  work_schedule = "Work Schedule",
+  #current_smoker = "Current Smoker",
+  physically_active = "Phy.Active",
+  sat_fat = "Saturated Fat",
+  sugar = "Saturated Sugar",
+  alcohol_cat = "alcohol"
+)
+
+# Love plot
+p3 <- love.plot(formula3,
+               weights = analysis_data$m3.sweightt,
+               data = analysis_data,
+               method = "weighting",
+               thresholds = c(m = 0.2),
+               abs = FALSE,
+               shapes = c("circle filled", "triangle filled"),
+               colors = c("orange", "green"),
+               e.names = c("Original", "Weighted (IPW)"),
+               size = 7,
+               binary = "std",
+               continuous = "std",
+               s.d.denom = "pooled",
+               var.names = label)
+
+# Styling
+p3 <- p3 + scale_shape_manual(values = c(4, 2)) +
+  theme(legend.position = "right",
+        legend.position.inside = c(.89, .93),
+        legend.background = element_rect(color = "grey", fill = "white"),
+        legend.title = element_text(size = 25),
+        legend.text = element_text(size = 25),
+        legend.key.size = unit(1, "cm"),
+        axis.title.x = element_text(size = 30, margin = margin(t = 20)),
+        axis.text = element_text(size = 25),
+        strip.text = element_text(size = 25),
+        plot.margin = margin(10, 20, 10, 20)) +
+  labs(title = "")
+
+p3
+# Save plot
+ggsave(filename = "figures/balplot3.pdf", plot = p3, device = "pdf",
+       dpi = 300, width = 18, height = 13, units = "in")
+
+```
+
+
+```{r}
+analysis_data$m3.new.sweightt <- analysis_data$interview_weight * analysis_data$m3.sweightt
+
+w.design.s4 <- svydesign(
+  id = ~psu,
+  strata = ~stratum,
+  weights = ~m3.new.sweightt,
+  data = analysis_data,
+  nest = TRUE
+)
+
+```
+
+
+
+```{r}
+# Outcome model
+#out.formula3 <- as.formula(I(Obesity  == "Obese") ~ Exposure)
+
+# Fit survey-weighted Poisson regression model on PS-weighted data
+#model.ps3 <- svyglm(out.formula3, design = w.design.s4, family = poisson(link = #"log"))
+
+# Display summary of results
+#summary(model.ps3)
+
+```
+
+
+```{r}
+
+#summ(model.ps3, exp = TRUE, confint = TRUE, digits = 3)
+```
+
+
+```{r}
+model.formula3 <- as.formula(I(Obesity == 'Obese') ~ Exposure + gender + race_ethnicity + education + income_ratio + Age_Group + work_schedule + energy_kcal + physically_active + sat_fat + sugar + energy_kcal + alcohol_cat + dyslipidemia + hypertension + depression + diabetes + apnea_symptoms + sleep_weekday + sleep_weekend + snore
+                             )
+```
+
+
+```{r}
+
+model.ps4 <- svyglm(model.formula3, design = w.design.s4, family = poisson(link = "log"))
+
+
+summary(model.ps4)
+```
+
+
+```{r}
+summ(model.ps4, exp = TRUE, confint = TRUE, digits = 3)
+```
+```{r}
+summary(model.ps4, df.resid = degf(w.design.s4))
+```
+
+
+```{r}
+
+corrected_summary <- summary(model.ps4, df.resid = degf(w.design.s4))
+
+# 2. Extract coefficients and CIs manually
+coefs <- coef(corrected_summary)
+ses <- sqrt(diag(vcov(model.ps4)))  # std errors
+pvals <- coef(summary(model.ps4, df.resid = degf(w.design.s4)))[, 4]  # corrected p-values
+
+# 3. Create dataframe with exponentiated estimates and CI
+results_df <- as.data.frame(coefs)
+results_df$RR <- exp(results_df$Estimate)
+results_df$CI_lower <- exp(results_df$Estimate - 1.96 * ses)
+results_df$CI_upper <- exp(results_df$Estimate + 1.96 * ses)
+results_df$p_value <- format.pval(pvals, digits = 3, eps = 0.001)
+
+# 4. Clean up
+results_df <- results_df[, c("RR", "CI_lower", "CI_upper", "p_value")]
+results_df$Variable <- rownames(coefs)
+rownames(results_df) <- NULL
+
+# 5. Optional: rearrange columns
+results_df <- results_df[, c("Variable", "RR", "CI_lower", "CI_upper", "p_value")]
+
+
+print(results_df)
+
+
+
+```
+
+
+
+```{r}
+#(p / p2 / p3) + 
+ # plot_annotation(tag_levels = 'A', tag_prefix = "(", tag_suffix = ")")
+
+
+
+#(p) + plot_annotation(tag_levels = 'A', tag_prefix = "(", tag_suffix = ")")
+```
+
+
+
+
+
+
+# MICE Imputation
+
+```{r}
+mice_nhanes <- data_nhanes[,-c(4,16)]
+
+```
+
+```{r}
+#mice_nhanes <- mice_nhanes
+```
+
+```{r}
+#mice_nhanes <- mice_nhanes
+```
+
+
+```{r}
+library(naniar)
+pct_miss_case(mice_nhanes)
+plot_missing(mice_nhanes)
+```
+```{r}
+
+missing_summary <- mice_nhanes %>%
+  summarise(across(everything(), ~mean(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "pct_missing") %>%
+  mutate(pct_missing = round(pct_missing * 100, 2))  # convert to percentage
+
+# Filter variables with < 5% missingness
+low_missing_vars <- missing_summary %>%
+  filter(pct_missing < 5)
+
+
+print(low_missing_vars)
+
+```
+
+```{r}
+pct_miss_case(mice_nhanes)
+```
+
+
+```{r}
+#mice_nhanes <- mice_nhanes %>%
+ # drop_na(sleep_weekend, diabetes, hypertension, Obesity, marital_status, education, #sleep_weekday, Exposure, physically_active)
+```
+
+```{r}
+library(tableone)
+
+# Drop PSU, Stratum, and SEQN
+data_subset <- mice_nhanes[ , !(names(mice_nhanes) %in% c("psu", "stratum", "SEQN","interview_weight"))]
+
+
+sum_table2 <- table1(~ . | Exposure, data = data_subset)
+
+t1flex(sum_table2) %>% 
+  save_as_docx(path="results/tablemice1.docx")
+
+```
+
+```{r}
+plot_missing(mice_nhanes)
+```
+
+
+```{r}
+library(mice)
+
+nic(mice_nhanes)/nrow(mice_nhanes)*100
+```
+
+```{r}
+# List all variables used in your final model
+model_vars <- c("gender", "race_ethnicity", "income_ratio", "education",
+                "sleep_weekday", "sleep_weekend", "snore", "apnea_symptoms", "Exposure",
+                "diabetes", "sat_fat", "sugar", "energy_kcal", "depression", "work_schedule",
+                "hypertension", "Obesity", "Age_Group", "alcohol_cat", "dyslipidemia", 
+                "physically_active")
+
+# Drop rows with any missing values in those variables
+complete_case_data <- data_nhanes[complete.cases(data_nhanes[, model_vars]), ]
+
+# Get complete-case sample size
+n_complete <- nrow(complete_case_data)
+n_complete
+```
+```{r}
+library(gtsummary)
+library(dplyr)
+
+# Define all variables from your final model
+all_vars <- c(
+  "Exposure", "gender", "race_ethnicity", "income_ratio", 
+  "education", "sleep_weekday", "sleep_weekend", "snore", "apnea_symptoms", 
+  "diabetes", "sat_fat", "sugar", "energy_kcal", "depression", 
+  "work_schedule", "hypertension", "Obesity", "Age_Group", "alcohol_cat", 
+  "dyslipidemia", "physically_active"
+)
+
+# Define which of these are categorical
+cat_vars <- c(
+  "Exposure", "gender", "race_ethnicity", "education", 
+  "snore", "apnea_symptoms", "diabetes", "depression", 
+  "work_schedule", "hypertension", "Obesity", "Age_Group", "alcohol_cat", 
+  "dyslipidemia", "physically_active"
+)
+
+
+
+# Recode as character FIRST, then convert to factor with correct levels
+mice_nhanes <- mice_nhanes %>%
+  mutate(
+    dyslipidemia = factor(as.character(dyslipidemia), levels = c("No", "Yes")),
+    hypertension = factor(as.character(hypertension), levels = c("No", "Yes")),
+    physically_active = factor(as.character(physically_active), levels = c("No", "Yes")),
+    Exposure = factor(as.character(Exposure), levels = c("No", "Yes"))
+  )
+
+
+# Create the summary table
+table_nhanes <- mice_nhanes %>%
+  dplyr::select(all_of(all_vars)) %>%
+  tbl_summary(
+    by = Exposure,
+    type = list(
+    all_continuous() ~ "continuous",
+    all_categorical() ~ "categorical"),
+    missing = "ifany",
+    missing_text = "(Missing)",
+    statistic = list(
+      all_continuous() ~ "{median} ({p25}, {p75})",
+      all_categorical() ~ "{n} ({p}%)"
+    ),
+    digits = all_continuous() ~ 2
+  ) %>%
+  add_overall() %>%
+  bold_labels()
+
+# Print the table
+print(table_nhanes)
+
+```
+
+\footnotesize
+\item[1] Values are presented as \textit{n} (\%) for categorical variables and median (Q1, Q3) for continuous variables.
+\item[] Missing values for each variable are shown as raw counts.
+\item[] This table is based on the analytic sample prior to imputation. A complete-case sample, defined as participants with no missing values on model variables, was used in sensitivity analyses.
+\end{TableNotes}
+
+
+```{r}
+# How many Imputations by Von Hippel
+library(howManyImputations)
+
+# 2. Run your pilot imputation (e.g. m0 = 20 as von Hippel recommends)
+ini_imp <- mice(mice_nhanes, m = 20, maxit = 5, printFlag = FALSE, seed = 500)
+
+# 3. Fit your substantive model in each imputed set (no survey‐weights here)
+pilot_mod <- with(
+  data = ini_imp,
+  glm(I(Obesity == "Obese") ~ Exposure + gender + race_ethnicity +
+        Age_Group + education + income_ratio +
+        work_schedule + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes + snore + sleep_weekday + sleep_weekend,
+      family = poisson(link = "log"))
+)
+
+
+m_needed <- how_many_imputations(pilot_mod)
+print(m_needed)
+
+```
+```{r}
+imp_init <- mice(mice_nhanes, maxit = 0, print = FALSE)
+pred     <- imp_init$pred
+meth     <- imp_init$meth     # a named vector of length ncol(data)
+
+
+# Zero‐out predictors for these variables
+for (v in c("SEQN","psu","stratum","interview_weight")) {
+  meth[v] <- ""               # do not impute
+  pred[,v] <- pred[v,] <- 0   # do not use as predictor
+}
+
+# Continuous with predictive mean matching
+for (v in c("sat_fat","sugar","energy_kcal","sleep_weekday","sleep_weekend","income_ratio")) {
+  meth[v] <- "pmm"
+}
+
+# Binary logistic
+for (v in c("hypertension","diabetes","dyslipidemia","alcohol_cat","physically_active")) {
+  meth[v] <- "logreg"
+}
+
+# Polytomous logistic
+for (v in c("snore","apnea_symptoms","education","daytime_sleepy", "depression")) {
+  meth[v] <- "polyreg"
+}
+
+imputation <- mice(
+  data            = mice_nhanes,
+  predictorMatrix = pred,
+  method          = meth,
+  m               = 45,    # or 45, whatever your how_many_imputations() returned
+  maxit           = 10,
+  seed            = 123,
+  printFlag       = FALSE
+)
+
+```
+
+
+```{r}
+#mice_nhanes <- mice_nhanes %>%
+ # drop_na(sleep_weekend, diabetes, hypertension, Obesity, marital_status, education, #sleep_weekday, Exposure, physically_active)
+```
+
+```{r}
+
+#imputation <- mice(data = mice_nhanes, maxit = 0, print = FALSE)
+```
+
+
+```{r}
+
+#pred <- imputation$pred
+
+# Exclude IDs and design variables from prediction
+#pred[,"SEQN"] <- pred["SEQN",] <- 0
+#pred[,"psu"] <- pred["psu",] <- 0
+#pred[,"interview_weight"] <- pred["interview_weight",] <- 0
+#pred["stratum",] <- 0  # Stratum only removed as predictor, not outcome
+```
+
+
+```{r, include=FALSE}
+#meth <- imputation$meth
+#meth["sat_fat"] <- "pmm"
+#meth["sugar"] <- "pmm"
+#meth["sleep_weekend"] <- "pmm"
+#meth["sleep_weekday"] <- "pmm"
+#meth["energy_kcal"] <- "pmm"
+#meth["income_ratio"] <- "pmm"
+
+#meth["current_smoker"] <- "logreg"  # binary logistic regression (if binary)
+#meth["work_schedule"] <- "logreg"
+#meth["diabetes"] <- "logreg"
+#meth["diabetes"] <- "logreg"
+#meth["hypertension"] <- "logreg"
+#meth["alcohol_cat"] <- "logreg"
+#meth["dyslipidemia"] <- "logreg"
+#meth["physically_active"] <- "logreg"
+#meth["apnea_symptoms"] <- "logreg"
+
+#meth["snore"] <- "polyreg"
+#meth["education"] <- "polyreg"
+#meth["depression"] <- "polyreg"
+#meth["daytime_sleepy"] <- "polyreg"
+
+#imputation <- mice(data = mice_nhanes, 
+      #             seed = 123, 
+    #               predictorMatrix = pred,
+      #             method = meth, 
+      #             m = 45, 
+      #             maxit = 10, 
+      #             print = FALSE)
+```
+
+
+
+
+```{r, include=FALSE}
+impdata <- mice::complete(imputation, action = "long")
+
+```
+
+
+
+
+
+
+```{r, message=FALSE, include=FALSE}
+
+
+impdata$.id <- NULL
+m <- 45
+set.seed(123)
+
+allImputations <- imputationList(lapply(1:m, 
+                                         function(n)
+                                           subset(impdata, subset=.imp==n)))
+
+str(allImputations)
+
+```
+
+
+
+```{r}
+
+DataExplorer::plot_missing(impdata)
+```
+
+
+
+Step 2: PS weighting steps 1-3 by DuGoff et al. (2014)
+Our next step is to use steps 1-3 of the PS weighting analysis:
+
+Step 2.1: Fit the PS model by considering survey features as covariates.
+Step 2.2: Calculate PS weights
+Step 2.3: Balance checking using SMD. Consider SMD <0.2 as a good covariate balancing.
+Step 2.1: PS model specification 
+
+# Model 1
+
+```{r}
+ps.formula <- as.formula(I(Exposure == "Yes") ~ Age_Group + gender + income_ratio +  education + race_ethnicity 
+                             + psu + stratum + interview_weight)
+```
+
+
+```{r}
+dat.ps <- list(NULL)
+
+m <- 45 # 45 imputed dataset
+
+# PS weighting on each of the imputed datasets
+for (ii in 1:m) {
+  # Imputed dataset
+  dat.imputed <- subset(impdata, .imp == ii)
+  
+  # Propensity scores
+  ps.fit <- glm(ps.formula, data = dat.imputed, family = binomial("logit"))
+  dat.imputed$ps <- fitted(ps.fit)
+  
+  # Stabilized weight
+  dat.imputed$sweight <- with(dat.imputed, 
+                              ifelse(I(Exposure == "Yes"), 
+                                     mean(I(Exposure == "Yes"))/ps, 
+                                     (1-mean(I(Exposure == "Yes")))/(1-ps)))
+
+  # Dataset
+  dat.ps[[ii]] <- dat.imputed
+}
+
+# Weight summary
+purrr::map_df(dat.ps, function(df){summary(df$sweight)})
+```
+
+
+
+
+# Balance checking for each imputed dataset
+
+```{r, include=FALSE}
+tab1m <- list(NULL)
+for (ii in 1:m) {
+  # PS weighted imputed data
+  dat <- dat.ps[[ii]]
+  
+  # Covariates
+  vars <- c("Age_Group", "gender", "education", "race_ethnicity", 
+            "income_ratio")
+  
+  # Design with truncated stabilized weight
+  wdesign <- svydesign(ids = ~SEQN, weights = ~sweight, data = dat)
+  
+  # Balance checking 
+  tab1m[[ii]] <- svyCreateTableOne(vars = vars, strata = "Exposure", data = wdesign,
+                                   test = F)
+}
+print(tab1m, smd = TRUE)
+```
+
+
+
+
+```{r}
+library(cobalt)
+library(dplyr)
+
+# Set up your covariate formula
+balance_formula <- Exposure ~ Age_Group + gender + education + race_ethnicity +
+  income_ratio
+
+# Store the SMDs in a list
+smd_list <- list()
+
+for (i in 1:m) {
+  dat <- dat.ps[[i]]
+  
+  # Compute balance
+  bal <- bal.tab(
+    x = balance_formula,
+    data = dat,
+    weights = dat$sweight,
+    method = "weighting",
+    estimand = "ATE"
+  )
+  
+  # Extract only the SMDs from the balance table
+  smd_vector <- bal$Balance[, "Diff.Adj"]
+  names(smd_vector) <- rownames(bal$Balance)
+  
+  smd_list[[i]] <- smd_vector
+}
+
+# Convert to data frame
+smd_df <- do.call(rbind, smd_list)  # each row is an imputation
+
+# Summarize across imputations
+smd_summary <- data.frame(
+  Variable = colnames(smd_df),
+  Mean_SMD = apply(smd_df, 2, mean, na.rm = TRUE),
+  Max_SMD = apply(smd_df, 2, function(x) max(abs(x), na.rm = TRUE))
+)
+
+# Print the summary
+print(smd_summary)
+
+
+```
+
+Covariate balance after propensity score weighting was assessed using standardized mean differences (SMDs). For multiply imputed datasets (m = 90), SMDs were computed within each imputation and then summarized across imputations by reporting the mean and maximum SMD per covariate. All covariates used in the propensity score model demonstrated adequate balance, with mean SMDs well below the commonly used threshold of 0.1, indicating good comparability between exposed and unexposed groups after weighting (see Figure X and Table Y).
+
+```{r}
+
+# 1. Combine imputed datasets into one long data frame
+dat_combined <- bind_rows(dat.ps, .id = ".imp")  # adds .imp = 1, 2, ...
+dat_combined$.imp <- as.integer(dat_combined$.imp)
+
+# 2. Compute balance across imputations with weights
+bal2 <- bal.tab(
+  Exposure ~ Age_Group + gender + education + race_ethnicity +
+    income_ratio,
+  data = dat_combined,
+  weights = dat_combined$sweight,   # assumes sweight is present in all
+  imp = ".imp",                     # imputation ID column
+  method = "weighting",
+  estimand = "ATE",
+  s.d.denom = "pooled",
+  m.threshold = 0.2,
+  un = TRUE                         # include unadjusted SMDs
+)
+
+# 3. Define variable labels for prettier plot axes
+var.labels <- c(
+  Age_Group = "Age Group",
+  gender = "Gender",
+  income_ratio = "Income Ratio",
+  education = "Education",
+  race_ethnicity = "Race/Ethnicity"
+  #marital_status = "Marital Status",
+  #work_schedule = "Work Schedule"
+)
+
+vars_to_show <- names(var.labels)
+
+# 4. Create the directional Love plot with full customization
+p.simm2 <- love.plot(
+  x = bal2,
+  stat = "mean.diffs",
+  abs = FALSE,                          # show direction
+  stars = "std",                        # interpret as standardized
+  thresholds = c(m = 0.2),              # draw vertical threshold
+  var.names = var.labels,              # custom labels
+  disp.vars = vars_to_show,            # limit to key covariates
+  binary = "std",
+  continuous = "std",
+  s.d.denom = "pooled",
+  shapes = c("circle filled", "triangle filled"),
+  colors = c("orange", "darkgreen"),
+  e.names = c("Unweighted", "Weighted (IPTW)"),
+  size = 7,
+  disp = "dots"
+)
+
+# 5. Customize plot theme with ggplot2
+p.simm2 <- p.simm2 +
+  scale_shape_manual(values = c(16, 17)) +
+  theme(
+    legend.position = "right",
+    legend.position.inside = c(.89, .93),
+    legend.background = element_rect(color = "grey80", fill = "white"),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    legend.key.size = unit(1, "cm"),
+    axis.title.x = element_text(size = 16, margin = margin(t = 20)),
+    axis.text = element_text(size = 12),
+    strip.text = element_text(size = 14),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  labs(
+    title = "Covariate Balance Before and After Weighting",
+    x = "Standardized Mean Difference"
+  )
+
+# 6. Print the Love plot
+#print(p.simm2)
+
+```
+
+
+
+
+## Step 3: Outcome modelling
+Our next step is to fit the outcome model on each of the imputed dataset. Note that, we must utilize survey features to correctly estimate the standard error. For this step, we will multiply PS weight and survey weight and create a new weight variable.
+
+3.1 Calculating new weights
+
+```{r}
+# Number of imputations
+m <- length(dat.ps)
+
+# Step 1: Multiply PS weights and survey weights
+for (ii in 1:m) {
+  dat <- dat.ps[[ii]]
+  dat$new_weight <- with(dat, interview_weight * sweight)
+  dat.ps[[ii]] <- dat
+}
+
+# Step 2: Create survey design for each imputed dataset
+survey_designs <- lapply(dat.ps, function(dat) {
+  svydesign(
+    ids = ~psu,
+    strata = ~stratum,
+    weights = ~new_weight,
+    data = dat,
+    nest = TRUE
+  )
+})
+
+# Step 3: Define model formula
+model_formula <- I(Obesity == "Obese") ~ Exposure + gender + race_ethnicity + 
+  Age_Group + education + income_ratio
+
+# Step 4: Fit model to each design
+fit_list <- lapply(survey_designs, function(des) {
+  svyglm(model_formula, design = des, family = poisson(link = "log"))
+})
+
+# Step 5: Pool the results
+pooled <- MIcombine(fit_list)
+
+# Step 6: Summarize pooled results
+summary(pooled, digits = 4, logeffect = TRUE)
+```
+
+
+
+
+```{r}
+# Extract coefficients and standard errors
+est <- pooled$coefficients
+se <- sqrt(diag(pooled$variance))
+
+# Compute Risk Ratios and 95% CI
+RR <- round(exp(est), 3)
+CI <- round(exp(confint(pooled)), 3)
+
+# Calculate p-values manually (Wald test)
+z <- est / se
+p_vals <- round(2 * pnorm(-abs(z)), 3)
+
+# Combine into a clean data frame
+result_table <- data.frame(
+  Variable = names(est),
+  Risk_Ratio = RR,
+  CI_Lower = CI[, 1],
+  CI_Upper = CI[, 2],
+  P_Value = p_vals,
+  row.names = NULL
+)
+
+# Print or export
+print(result_table)
+
+
+
+
+```
+
+# OR
+
+
+
+
+```{r}
+#library(survey)
+#library(mice)
+
+#m <- length(allImputations$imputations)
+
+#w.design_mice <- vector("list", m)
+
+#for (ii in 1:m) {
+ # this_data <- allImputations$imputations[[ii]]
+ # this_data$new_weight <- with(dat, interview_weight * sweight) 
+ # w.design_mice[[ii]] <- svydesign(
+ #   ids = ~psu,
+ #   strata = ~stratum,
+  #  weights = ~new_weight,
+  #  data = this_data,
+ #   nest = TRUE
+ # )
+#}
+
+
+
+#model.ps2 <- vector("list", m)
+
+#for (ii in 1:m) {
+#  model.ps2[[ii]] <- svyglm(
+ #   I(Obesity == "Obese") ~ Exposure + gender + race_ethnicity + 
+ #     Age_Group + education + income_ratio + work_schedule,
+ #   design = w.design_mice[[ii]],
+ #   family = poisson(link = "log")
+ # )
+#}
+
+
+#pooled_mice <- MIcombine(model.ps2)
+#summary(pooled_mice, logeffect = TRUE)
+
+
+```
+
+# or ENDS here - the above
+
+
+## BONUS using MATCHTHEM
+
+```{r, include=FALSE}
+library(mice)
+library(MatchThem)
+library(cobalt)
+library(survey)
+library(sandwich)
+library(lmtest)
+library(mitools)
+library(ggplot2)
+library(dplyr)
+
+weighted <- weightthem(
+  Exposure ~ Age_Group + gender + income_ratio +  education + race_ethnicity 
+                             + psu + stratum + interview_weight,
+  data = imputation,
+  method = "ps",
+  estimand = "ATE",
+  stabilize = TRUE,
+  trim.at = 0.01
+)
+
+# covariate balance 
+balance <- bal.tab(weighted, un = TRUE, disp.v.ratio = TRUE)
+print(balance)
+
+balance_df <- balance$Balance
+
+# Remove rows corresponding to survey design variables
+vars_to_remove <- c("psu", "strata", "weight")
+clean_balance <- balance_df[!rownames(balance_df) %in% vars_to_remove, ]
+
+
+print(clean_balance)
+
+# Recreate a filtered copy of the object
+library(cobalt)
+
+balance <- bal.tab(weighted, un = TRUE)
+
+# Filter balance table
+filtered_balance <- balance
+filtered_balance$Balance <- balance$Balance[!rownames(balance$Balance) %in% c("psu_2", "stratum", "interview_weight"), ]
+```
+
+
+```{r, include=FALSE}
+# Now plot directly from balance object
+p.simm_ <- love.plot(
+  x = weighted,
+  stat = "mean.diffs",
+  stars = "std",
+  thresholds = c(m = 0.2),
+  abs = FALSE,
+  disp.stat = "mean.diffs",
+  binary = "std",
+  continuous = "std",
+  s.d.denom = "pooled",
+  shapes = c("circle filled", "triangle filled"),
+  colors = c("orange", "green"),
+  e.names = c("Unadjusted", "Adjusted"),
+  size = 7
+)
+
+
+# Customize the plot with ggplot2
+p.simm_ <- p.simm_ + 
+  scale_shape_manual(values = c(16, 17)) + 
+  theme(
+    legend.position = "inside",
+    legend.position.inside = c(.89, .93),
+    legend.background = element_rect(color = "grey", fill = "white"),
+    legend.title = element_text(size = 16),
+    legend.text = element_text(size = 14),
+    legend.key.size = unit(1, "cm"),
+    axis.title.x = element_text(size = 18, margin = margin(t = 20)),
+    axis.text = element_text(size = 14),
+    strip.text = element_text(size = 16),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  labs(
+    title = "Covariate Balance Before and After IPTW",
+    x = "Standardized Mean Difference"
+  )
+
+print(p.simm_)
+
+
+imp_data <- complete(weighted, "all")
+
+
+models <- lapply(imp_data, function(df) {
+  print(names(df))
+  df$combined_weight <- df$weights * df$interview_weight  # Multiply IPTW by survey weight
+  
+  design <- svydesign(
+    ids = ~psu,
+    strata = ~stratum,
+    weights = ~combined_weight,
+    data = df,
+    nest = TRUE
+  )
+  
+  svyglm(I(Obesity == "Obese") ~ Exposure + gender + race_ethnicity + 
+      Age_Group + education + income_ratio,
+         design = design,
+         family = poisson(link = "log"))
+})
+
+# Pool results using Rubins rules
+pooled_mice <- MIcombine(models)
+summary(pooled_mice, logeffect = TRUE)
+
+# Extract coefficients and standard errors
+est <- pooled_mice$coefficients
+se <- sqrt(diag(pooled_mice$variance))
+
+# Compute Risk Ratios and 95% CI
+RR <- round(exp(est), 3)
+CI <- round(exp(confint(pooled_mice)), 3)
+
+# Calculate p-values manually (Wald test)
+z <- est / se
+p_vals <- round(2 * pnorm(-abs(z)), 3)
+
+# Combine into a clean data frame
+result_table2 <- data.frame(
+  Variable = names(est),
+  Risk_Ratio = RR,
+  CI_Lower = CI[, 1],
+  CI_Upper = CI[, 2],
+  P_Value = p_vals,
+  row.names = NULL
+)
+
+# Print or export
+print(result_table2)
+```
+
+This gave the results as that of the loop method we used earlier.
+
+
+
+
+
+
+
+
+
+
+
+## Building MODEL 2 using loop
+
+
+
+```{r, include=FALSE}
+ps.formula_two <- as.formula(I(Exposure == "Yes") ~ Age_Group + gender + income_ratio +  education + race_ethnicity + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes + psu + stratum + interview_weight)
+
+dat.ps2 <- list(NULL)
+
+m <- 45 # 90 imputed dataset
+
+# PS weighting on each of the imputed datasets
+for (ii in 1:m) {
+  # Imputed dataset
+  dat.imputed2 <- subset(impdata, .imp == ii)
+  
+  # Propensity scores
+  ps.fit2 <- glm(ps.formula_two, data = dat.imputed2, family = binomial("logit"))
+  dat.imputed2$ps <- fitted(ps.fit2)
+  
+  # Stabilized weight
+  dat.imputed2$sweight2 <- with(dat.imputed2, 
+                              ifelse(I(Exposure == "Yes"), 
+                                     mean(I(Exposure == "Yes"))/ps, 
+                                     (1-mean(I(Exposure == "Yes")))/(1-ps)))
+
+  # Dataset
+  dat.ps2[[ii]] <- dat.imputed2
+}
+
+# Weight summary
+purrr::map_df(dat.ps2, function(df){summary(df$sweight2)})
+
+tab2m <- list(NULL)
+for (ii in 1:m) {
+  # PS weighted imputed data
+  dat2 <- dat.ps2[[ii]]
+  
+  # Covariates
+  vars <- c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","physically_active", "sat_fat", "sugar","energy_kcal","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes")
+  
+  # Design with truncated stabilized weight
+  wdesign2 <- svydesign(ids = ~SEQN, weights = ~sweight2, data = dat2)
+  
+  # Balance checking 
+  tab2m[[ii]] <- svyCreateTableOne(vars = vars, strata = "Exposure", data = wdesign2,
+                                   test = F)
+}
+print(tab2m, smd = TRUE)
+```
+
+
+
+
+```{r}
+library(cobalt)
+library(dplyr)
+
+# Set up your covariate formula
+balance_formula2 <- Exposure ~ gender + race_ethnicity + education + income_ratio + Age_Group + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes
+
+
+# Store the SMDs in a list
+smd_list2 <- list()
+
+for (i in 1:m) {
+  dat2 <- dat.ps2[[i]]
+  
+  # Compute balance
+  bal2 <- bal.tab(
+    x = balance_formula2,
+    data = dat2,
+    weights = dat2$sweight2,
+    method = "weighting",
+    estimand = "ATE"
+  )
+  
+  # Extract only the SMDs from the balance table
+  smd_vector2 <- bal2$Balance[, "Diff.Adj"]
+  names(smd_vector2) <- rownames(bal2$Balance)
+  
+  smd_list2[[i]] <- smd_vector2
+}
+
+# Convert to data frame
+smd_df2 <- do.call(rbind, smd_list2)  # each row is an imputation
+
+# Summarize across imputations
+smd_summary2 <- data.frame(
+  Variable = colnames(smd_df2),
+  Mean_SMD = apply(smd_df2, 2, mean, na.rm = TRUE),
+  Max_SMD = apply(smd_df2, 2, function(x) max(abs(x), na.rm = TRUE))
+)
+
+# Print the summary
+print(smd_summary2)
+
+
+```
+
+
+
+```{r}
+
+
+dat_combined2 <- bind_rows(dat.ps2, .id = ".imp") 
+dat_combined2$.imp <- as.integer(dat_combined2$.imp)
+
+
+bal2 <- bal.tab(
+  Exposure ~ gender + race_ethnicity  + education + income_ratio + Age_Group + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes,
+  data = dat_combined2,
+  weights = dat_combined2$sweight2,   
+  imp = ".imp",                    
+  method = "weighting",
+  estimand = "ATE",
+  s.d.denom = "pooled",
+  m.threshold = 0.2,
+  un = TRUE                         
+)
+
+
+var.labels <- c(
+  Age_Group = "Age Group",
+  gender = "Gender",
+  income_ratio = "Income Ratio",
+  education = "Education",
+  race_ethnicity = "Race/Ethnicity"
+  #marital_status = "Marital Status",
+  #work_schedule = "Work Schedule"
+)
+
+vars_to_show <- names(var.labels)
+
+
+p.simm2_ <- love.plot(
+  x = bal2,
+  stat = "mean.diffs",
+  abs = FALSE,                          # show direction
+  stars = "std",                        # interpret as standardized
+  thresholds = c(m = 0.2),              # draw vertical threshold
+  var.names = var.labels,              # custom labels
+  disp.vars = vars_to_show,            # limit to key covariates
+  binary = "std",
+  continuous = "std",
+  s.d.denom = "pooled",
+  shapes = c("circle filled", "triangle filled"),
+  colors = c("orange", "darkgreen"),
+  e.names = c("Unweighted", "Weighted (IPTW)"),
+  size = 7
+)
+
+
+p.simm2_ <- p.simm2_ +
+  scale_shape_manual(values = c(16, 17)) +
+  theme(
+    legend.position = "right",
+    legend.position.inside = c(.89, .93),
+    legend.background = element_rect(color = "grey80", fill = "white"),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    legend.key.size = unit(1, "cm"),
+    axis.title.x = element_text(size = 16, margin = margin(t = 20)),
+    axis.text = element_text(size = 12),
+    strip.text = element_text(size = 14),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  labs(
+    title = "Covariate Balance Before and After Weighting",
+    x = "Standardized Mean Difference"
+  )
+
+
+print(p.simm2_)
+
+```
+
+
+
+
+
+
+```{r}
+
+
+library(survey)
+library(mitools)
+
+# Step 1: Apply new_weight2 = interview_weight * sweight2
+m <- length(dat.ps2)
+
+for (ii in 1:m) {
+  dat2 <- dat.ps2[[ii]]
+  dat2$new_weight2 <- with(dat2, interview_weight * sweight2)
+  dat.ps2[[ii]] <- dat2
+}
+
+# Step 2: Create survey design per imputed dataset
+survey_designs2 <- lapply(dat.ps2, function(dat) {
+  svydesign(
+    ids = ~psu,
+    strata = ~stratum,
+    weights = ~new_weight2,
+    data = dat,
+    nest = TRUE
+  )
+})
+
+# Step 3: Define model
+model_formula.2 <- I(Obesity == "Obese") ~ Exposure + gender + race_ethnicity + 
+   education + income_ratio + Age_Group  + 
+  physically_active + sat_fat + sugar + energy_kcal + 
+  alcohol_cat + dyslipidemia + hypertension + depression + diabetes
+
+# Step 4: Fit model across survey designs
+fit_list2 <- lapply(survey_designs2, function(des) {
+  svyglm(model_formula.2, design = des, family = poisson(link = "log"))
+})
+
+# Step 5: Pool results
+pooled.two <- MIcombine(fit_list2)
+summary(pooled.two, digits = 4, logeffect = TRUE)
+
+# Step 6: Create results table
+est <- pooled.two$coefficients
+se <- sqrt(diag(pooled.two$variance))
+
+# Risk Ratios and 95% CI
+RR <- round(exp(est), 3)
+CI <- round(exp(confint(pooled.two)), 3)
+
+# P-values
+z <- est / se
+p_vals <- round(2 * pnorm(-abs(z)), 3)
+
+# Output table
+result_table.two <- data.frame(
+  Variable = names(est),
+  Risk_Ratio = RR,
+  CI_Lower = CI[, 1],
+  CI_Upper = CI[, 2],
+  P_Value = p_vals,
+  row.names = NULL
+)
+
+# Print result table
+print(result_table.two)
+
+
+```
+
+
+
+
+
+
+## bILDING MODEL 3 using loop
+
+
+
+```{r, include=FALSE}
+ps.formula_three <- as.formula(I(Exposure == "Yes") ~ Age_Group + gender + income_ratio +  education + race_ethnicity + work_schedule + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes + snore + sleep_weekday + sleep_weekend + psu + stratum + interview_weight)
+
+dat.ps3 <- list(NULL)
+
+m <- 45 # 45 imputed dataset
+
+# PS weighting on each of the imputed datasets
+for (ii in 1:m) {
+  # Imputed dataset
+  dat.imputed3 <- subset(impdata, .imp == ii)
+  
+  # Propensity scores
+  ps.fit3 <- glm(ps.formula_three, data = dat.imputed3, family = binomial("logit"))
+  dat.imputed3$ps <- fitted(ps.fit3)
+  
+  # Stabilized weight
+  dat.imputed3$sweight3 <- with(dat.imputed3, 
+                              ifelse(I(Exposure == "Yes"), 
+                                     mean(I(Exposure == "Yes"))/ps, 
+                                     (1-mean(I(Exposure == "Yes")))/(1-ps)))
+
+  # Dataset
+  dat.ps3[[ii]] <- dat.imputed3
+}
+
+# Weight summary
+purrr::map_df(dat.ps3, function(df){summary(df$sweight3)})
+
+tab3m <- list(NULL)
+for (ii in 1:m) {
+  # PS weighted imputed data
+  dat3 <- dat.ps3[[ii]]
+  
+  # Covariates
+  vars <- c("Age_Group", "education", "gender", "race_ethnicity", "income_ratio","work_schedule", "physically_active", "sat_fat", "energy_kcal", "apnea_symptoms", "sugar","alcohol_cat","dyslipidemia","hypertension","depression", "diabetes", "snore", "sleep_weekday","sleep_weekend")
+  
+  # Design with truncated stabilized weight
+  wdesign3 <- svydesign(ids = ~SEQN, weights = ~sweight3, data = dat3)
+  
+  # Balance checking 
+  tab3m[[ii]] <- svyCreateTableOne(vars = vars, strata = "Exposure", data = wdesign3,
+                                   test = F)
+}
+print(tab3m, smd = TRUE)
+```
+
+
+
+
+```{r}
+
+
+# Set up your covariate formula
+balance_formula3 <- Exposure ~ gender + race_ethnicity + education + income_ratio + Age_Group + work_schedule + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes + snore + sleep_weekday + sleep_weekend
+
+
+# Store the SMDs in a list
+smd_list3 <- list()
+
+for (i in 1:m) {
+  dat3 <- dat.ps3[[i]]
+  
+  # Compute balance
+  bal3 <- bal.tab(
+    x = balance_formula3,
+    data = dat3,
+    weights = dat3$sweight3,
+    method = "weighting",
+    estimand = "ATE"
+  )
+  
+  # Extract only the SMDs from the balance table
+  smd_vector3 <- bal3$Balance[, "Diff.Adj"]
+  names(smd_vector3) <- rownames(bal3$Balance)
+  
+  smd_list3[[i]] <- smd_vector3
+}
+
+# Convert to data frame
+smd_df3 <- do.call(rbind, smd_list3)  # each row is an imputation
+
+# Summarize across imputations
+smd_summary3 <- data.frame(
+  Variable = colnames(smd_df3),
+  Mean_SMD = apply(smd_df3, 2, mean, na.rm = TRUE),
+  Max_SMD = apply(smd_df3, 2, function(x) max(abs(x), na.rm = TRUE))
+)
+
+# Print the summary
+print(smd_summary3)
+
+
+```
+
+
+
+```{r}
+
+
+dat_combined3 <- bind_rows(dat.ps3, .id = ".imp") 
+dat_combined3$.imp <- as.integer(dat_combined3$.imp)
+
+
+bal3 <- bal.tab(
+  Exposure ~ gender + race_ethnicity + education + income_ratio + Age_Group + work_schedule + physically_active + sat_fat + sugar + energy_kcal +  alcohol_cat + dyslipidemia + hypertension + depression + diabetes + snore + sleep_weekday + sleep_weekend,
+  data = dat_combined3,
+  weights = dat_combined3$sweight3,   
+  imp = ".imp",                    
+  method = "weighting",
+  estimand = "ATE",
+  s.d.denom = "pooled",
+  m.threshold = 0.2,
+  un = TRUE                         
+)
+
+
+var.labels <- c(
+  Age_Group = "Age Group",
+  gender = "Gender",
+  income_ratio = "Income Ratio",
+  education = "Education",
+  race_ethnicity = "Race/Ethnicity",
+  #marital_status = "Marital Status",
+  work_schedule = "Work Schedule"
+)
+
+vars_to_show <- names(var.labels)
+
+
+p.simm4_ <- love.plot(
+  x = bal3,
+  stat = "mean.diffs",
+  abs = FALSE,                          # show direction
+  stars = "std",                        # interpret as standardized
+  thresholds = c(m = 0.2),              # draw vertical threshold
+  var.names = var.labels,              # custom labels
+  disp.vars = vars_to_show,            # limit to key covariates
+  binary = "std",
+  continuous = "std",
+  s.d.denom = "pooled",
+  shapes = c("circle filled", "triangle filled"),
+  colors = c("orange", "darkgreen"),
+  e.names = c("Unweighted", "Weighted (IPTW)"),
+  size = 7
+)
+
+
+p.simm4_ <- p.simm4_ +
+  scale_shape_manual(values = c(16, 17)) +
+  theme(
+    legend.position = "right",
+    legend.position.inside = c(.89, .93),
+    legend.background = element_rect(color = "grey80", fill = "white"),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 12),
+    legend.key.size = unit(1, "cm"),
+    axis.title.x = element_text(size = 16, margin = margin(t = 20)),
+    axis.text = element_text(size = 12),
+    strip.text = element_text(size = 14),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  labs(
+    title = "Covariate Balance Before and After Weighting",
+    x = "Standardized Mean Difference Model 3"
+  )
+
+
+print(p.simm4_)
+
+```
+
+
+```{r}
+library(survey)
+library(mitools)
+
+# Step 1: Compute new_weight3 in each imputed dataset
+m <- length(dat.ps3)
+
+for (ii in 1:m) {
+  dat3 <- dat.ps3[[ii]]
+  dat3$new_weight3 <- with(dat3, interview_weight * sweight3)
+  dat.ps3[[ii]] <- dat3
+}
+
+# Step 2: Create a survey design for each imputed dataset
+survey_designs3 <- lapply(dat.ps3, function(dat) {
+  svydesign(
+    ids = ~psu,
+    strata = ~stratum,
+    weights = ~new_weight3,
+    data = dat,
+    nest = TRUE
+  )
+})
+
+# Step 3: Define your full model
+model_formula.3 <- I(Obesity == "Obese") ~ Exposure + gender + race_ethnicity +
+  education + income_ratio + Age_Group + work_schedule + physically_active + sat_fat + sugar + energy_kcal +  
+  alcohol_cat + dyslipidemia + hypertension + depression + diabetes + 
+  snore + sleep_weekday + sleep_weekend
+
+# Step 4: Fit model on each survey design
+fit_list3 <- lapply(survey_designs3, function(des) {
+  svyglm(model_formula.3, design = des, family = poisson(link = "log"))
+})
+
+# Step 5: Pool model results
+pooled.three <- MIcombine(fit_list3)
+summary(pooled.three, digits = 4, logeffect = TRUE)
+
+# Step 6: Build result table
+est <- pooled.three$coefficients
+se <- sqrt(diag(pooled.three$variance))
+
+RR <- round(exp(est), 3)
+CI <- round(exp(confint(pooled.three)), 3)
+
+z <- est / se
+p_vals <- round(2 * pnorm(-abs(z)), 3)
+
+result_table.three <- data.frame(
+  Variable = names(est),
+  Risk_Ratio = RR,
+  CI_Lower = CI[, 1],
+  CI_Upper = CI[, 2],
+  P_Value = p_vals,
+  row.names = NULL
+)
+
+# Step 7: Print or export
+print(result_table.three)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
