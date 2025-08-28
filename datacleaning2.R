@@ -37,7 +37,7 @@ for (col in columns_to_clean) {
   nhanes_data[[col]] <- forcats::fct_recode(nhanes_data[[col]], NULL = "Don't know", NULL = "Refused", NULL = "Don't Know")
 }
 
-# Replace 999 in Alcohol_Consumption with NA, keeping it numeric
+
 # Replace 999 and 777 in Alcohol_Consumption with NA, keeping it numeric
 nhanes_data$alcohol_day <- ifelse(nhanes_data$alcohol_day %in% c(999, 777), NA, nhanes_data$alcohol_day)
 
@@ -76,3 +76,4 @@ nhanes_data <- nhanes_data %>%
 
 
 saveRDS(nhanes_data, file = "nhanes_cleandata2.rds")
+
