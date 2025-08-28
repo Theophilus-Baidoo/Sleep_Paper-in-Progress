@@ -7,7 +7,7 @@ dataset_names <- c(
   "DEMO_J", "BMX_J", "BPX_J", "SMQ_J", "DIQ_J", "ALQ_J",
   "PAQ_J", "MCQ_J", "RHQ_J", "SLQ_J", "HUQ_J", "OHQ_J",
   "BGQ_J", "FSQ_J", "FSX_J", "BPQ_J", "DPQ_J", "ECQ_J",
-  "DR1TOT_J", "OCQ_J", "TRIGLY_J", "HDL_J"  # Added based on your variable list
+  "DR1TOT_J", "OCQ_J", "TRIGLY_J", "HDL_J"  
 )
 
 # Downloader with warning for missing datasets
@@ -146,5 +146,6 @@ dim(nhanes_data)
 
 
 write.csv(nhanes_data, "nhanes_2017_2018_cleaned2.csv", row.names = FALSE)
+
 
 
